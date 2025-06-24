@@ -154,3 +154,4 @@ class Schema2Cypher:
     def close_cypher_executor(self):
         if self.cypher_executor is not None:
             self.cypher_executor.close()
+            logging.info("Cypher executor closed")
