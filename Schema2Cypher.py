@@ -5,7 +5,7 @@ from CypherExecutor import CypherExecutor
 import dotenv
 from openai import OpenAI
 
-'''Environment variables could be initialized and usedin where u need to use the class Schema2Cypher \
+'''Environment variables could be initialized and used in where u need to use the class Schema2Cypher \
 by calling function get_llm and get_cypher_executor instead of initializing them here.'''
 
 
