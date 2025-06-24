@@ -5,14 +5,8 @@ from CypherExecutor import CypherExecutor
 import dotenv
 from openai import OpenAI
 
-dotenv.load_dotenv()
-
-NEO4J_URI = os.getenv("NEO4J_URI")
-NEO4J_USERNAME = os.getenv("NEO4J_USERNAME")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
-
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_URL = os.getenv("OPENAI_URL")
+'''Environment variables could be initialized and usedin where u need to use the class Schema2Cypher \
+by calling function get_llm and get_cypher_executor instead of initializing them here.'''
 
 
 class Schema2Cypher:
