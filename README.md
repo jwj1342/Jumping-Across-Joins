@@ -1,2 +1,3 @@
-# Jumping-Across-Joins
-This is  offical repo  for "Jumping Across Joins: Graph-Guided Expert Evolution for Text-to-SQL".
+## 开发日志
+
+- 2025-06-29 完成了基本的从数据库到 cypher 查询的转换，但是 cypher 插入图的格式有问题。

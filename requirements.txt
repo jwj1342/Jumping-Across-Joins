@@ -1,0 +1,12 @@
+# Snowflake连接器
+snowflake-connector-python>=3.6.0
+
+# 兼容的pyarrow版本（Snowflake要求）
+pyarrow<19.0.0
+
+# 环境变量管理
+python-dotenv>=1.0.0
+
+# 测试依赖
+pytest>=7.0.0
+pytest-mock>=3.10.0
