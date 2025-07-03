@@ -7,6 +7,17 @@ pyarrow<19.0.0
 # 环境变量管理
 python-dotenv>=1.0.0
 
+# 进度条显示
+tqdm>=4.65.0
+
 # 测试依赖
 pytest>=7.0.0
 pytest-mock>=3.10.0
+
+# LangChain相关依赖
+langchain>=0.1.0
+langchain-openai>=0.1.0
+openai>=1.0.0
+
+# JSON处理
+jsonlines>=3.0.0

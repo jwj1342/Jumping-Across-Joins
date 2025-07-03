@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 
 def snowflake_sql_query(
-    sql_query: str, database_id: str, timeout: int = 30
+    sql_query: str, database_id: str, timeout: int = 30, log: bool = False
 ) -> List[Dict[str, Any]]:
     """
     执行Snowflake SQL查询并返回结果
@@ -20,6 +20,7 @@ def snowflake_sql_query(
         sql_query (str): 要执行的SQL查询语句
         database_id (str): 数据库标识符
         timeout (int): 连接超时时间，默认30秒
+        log (bool): 是否输出SQL查询语句日志，默认为False
 
     返回:
         List[Dict[str, Any]]: 查询结果，每行数据作为字典返回
@@ -51,27 +52,35 @@ def snowflake_sql_query(
     if not account:
         raise ConnectionError("未找到SNOWFLAKE_ACCOUNT环境变量")
 
-    # 连接参数
+    # 连接参数（优化超时设置）
     connection_params = {
         "user": user,
         "password": password,
         "account": account,
         "database": database_id,
-        "login_timeout": timeout,
+        "login_timeout": min(timeout, 60),  # 登录超时最大60秒
         "network_timeout": timeout,
+        "socket_timeout": timeout,
+        "application": "Schema_Extractor",  # 标识应用
+        "session_parameters": {
+            "QUERY_TIMEOUT": timeout,  # 查询级别超时
+            "STATEMENT_TIMEOUT_IN_SECONDS": timeout,
+        },
     }
 
     conn = None
     cursor = None
 
     try:
+        if log:
+            logging.info(f"正在连接到Snowflake数据库: {database_id}")
+            logging.info(f"执行SQL查询: {sql_query}")
+
         # 建立连接
-        logging.info(f"正在连接到Snowflake数据库: {database_id}")
         conn = snowflake.connector.connect(**connection_params)
 
         # 创建游标并执行查询
         cursor = conn.cursor()
-        logging.info(f"执行SQL查询: {sql_query}")
         cursor.execute(sql_query)
 
         # 获取列名
@@ -106,7 +115,6 @@ def snowflake_sql_query(
             cursor.close()
         if conn:
             conn.close()
-            logging.info("Snowflake连接已关闭")
 
 
 if __name__ == "__main__":

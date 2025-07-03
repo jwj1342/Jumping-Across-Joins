@@ -1,2 +1,7 @@
 *.env
 __pycache__/
+*.log
+*.txt
+*_report.json
+*results/
+.vscode/
