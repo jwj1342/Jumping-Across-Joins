@@ -7,15 +7,18 @@ import logging
 
 
 class CypherExecutor:
-    def __init__(self):
+    def __init__(self, enable_info_logging=False):
         """
         初始化 CypherExecutor，建立与 Neo4j 数据库的连接。
 
         Args:
+            enable_info_logging (bool, optional): 是否启用 info 级别的日志输出。默认为 False。
             uri (str, optional): Neo4j 数据库的连接 URI。如果为None，则从环境变量NEO4J_URI读取
             username (str, optional): 数据库用户名。如果为None，则从环境变量NEO4J_USER读取
             password (str, optional): 数据库密码。如果为None，则从环境变量NEO4J_PASSWORD读取
         """
+        self.enable_info_logging = enable_info_logging
+        
         # TODO: 从环境变量中获取配置
         # load_dotenv(".env")
         self.uri = "neo4j://10.21.37.13:7687"
@@ -27,10 +30,20 @@ class CypherExecutor:
                 self.uri, auth=(self.username, self.password)
             )
             # 移除立即验证，改为懒加载
-            logging.info("Neo4j 驱动已初始化，等待首次使用时验证连接。")
+            self._log_info("Neo4j 驱动已初始化，等待首次使用时验证连接。")
         except Exception as e:
             logging.error(f"连接 Neo4j 数据库失败: {e}")
             self._driver = None  # 确保如果连接失败，驱动对象为None
+
+    def _log_info(self, message):
+        """
+        条件性记录 info 级别的日志信息。
+        
+        Args:
+            message (str): 要记录的日志信息
+        """
+        if self.enable_info_logging:
+            logging.info(message)
 
     def verify_connectivity(self):
         """
@@ -45,7 +58,7 @@ class CypherExecutor:
 
         try:
             self._driver.verify_connectivity()
-            logging.info("Neo4j 数据库连接验证成功。")
+            self._log_info("Neo4j 数据库连接验证成功。")
             return True
         except Exception as e:
             logging.error(f"Neo4j 数据库连接验证失败: {e}")
@@ -80,7 +93,7 @@ class CypherExecutor:
             logging.warning("没有找到有效的Cypher语句")
             return []
 
-        logging.info(f"在事务中准备执行 {len(statements)} 个Cypher语句")
+        self._log_info(f"在事务中准备执行 {len(statements)} 个Cypher语句")
 
         all_results = []
         success_count = 0
@@ -90,10 +103,10 @@ class CypherExecutor:
         for i, statement in enumerate(statements, 1):
             # 跳过注释行
             if statement.strip().startswith("//"):
-                logging.info(f"跳过注释语句 {i}: {statement[:50]}...")
+                self._log_info(f"跳过注释语句 {i}: {statement[:50]}...")
                 continue
 
-            logging.info(f"执行语句 {i}/{len(statements)}: {statement[:100]}...")
+            self._log_info(f"执行语句 {i}/{len(statements)}: {statement[:100]}...")
 
             try:
                 result = tx.run(statement, parameters)
@@ -102,7 +115,7 @@ class CypherExecutor:
                 all_results.extend(result_data)
                 success_count += 1
                 consecutive_failures = 0  # 重置连续失败计数器
-                logging.info(f"语句 {i} 执行成功")
+                self._log_info(f"语句 {i} 执行成功")
 
             except Exception as e:
                 consecutive_failures += 1
@@ -122,7 +135,7 @@ class CypherExecutor:
                 continue
 
         total_executed = len([s for s in statements if not s.strip().startswith("//")])
-        logging.info(f"事务中执行完成: {success_count}/{total_executed} 个语句成功")
+        self._log_info(f"事务中执行完成: {success_count}/{total_executed} 个语句成功")
 
         return all_results
 
@@ -154,7 +167,7 @@ class CypherExecutor:
                     self._execute_multiple_cypher_in_transaction,
                     cypher_statement,
                 )
-                logging.info("事务成功提交。")
+                self._log_info("事务成功提交。")
                 return True, result
 
             except (TransientError, ClientError, DatabaseError) as e:
@@ -173,7 +186,7 @@ class CypherExecutor:
         """
         if self._driver:
             self._driver.close()
-            logging.info("Neo4j 数据库连接已关闭。")
+            self._log_info("Neo4j 数据库连接已关闭。")
 
 
 if __name__ == "__main__":

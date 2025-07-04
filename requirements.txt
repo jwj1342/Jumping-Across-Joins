@@ -21,3 +21,6 @@ openai>=1.0.0
 
 # JSON处理
 jsonlines>=3.0.0
+
+# Neo4j图数据库
+neo4j>=5.0.0
