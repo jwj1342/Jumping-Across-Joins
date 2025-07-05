@@ -421,9 +421,9 @@ def main():
     
     # 设置路径
     project_root = Path(__file__).parent
-    input_file = project_root / "spider2-snow.jsonl"
+    input_file = project_root / "spider2-snow-crypto.jsonl"
     db_info_dir = project_root / "db_info"
-    results_dir = project_root / "multi_turn_results"
+    results_dir = project_root / "multi_turn_crypto_results"
     
     # 创建必要目录
     results_dir.mkdir(exist_ok=True)
@@ -454,7 +454,7 @@ def main():
         max_workers = min(32, (os.cpu_count() or 1) + 4)
         max_workers = int(os.getenv("MAX_WORKERS", max_workers))
         timeout_seconds = int(os.getenv("TIMEOUT_SECONDS", 300))
-        max_rounds = int(os.getenv("MAX_CORRECTION_ROUNDS", 5))
+        max_rounds = int(os.getenv("MAX_CORRECTION_ROUNDS", 10))
         
         logging.info(f"开始并发处理，最大工作线程数: {max_workers}, 超时时间: {timeout_seconds}秒, 最大修正轮数: {max_rounds}")
         

@@ -362,7 +362,7 @@ def validate_environment() -> bool:
         # 检查必要的目录
         project_root = Path(__file__).parent
         db_info_dir = project_root / "db_info"
-        input_file = project_root / "spider2-snow.jsonl"
+        input_file = project_root / "spider2-snow-crypto.jsonl"
         
         if not input_file.exists():
             logging.error(f"输入文件不存在: {input_file}")
@@ -426,9 +426,9 @@ def main():
     
     # 设置路径
     project_root = Path(__file__).parent
-    input_file = project_root / "spider2-snow.jsonl"
+    input_file = project_root / "spider2-snow-crypto.jsonl"
     db_info_dir = project_root / "db_info"
-    results_dir = project_root / "results"
+    results_dir = project_root / "single_turn_crypto_results"
     
     # 创建必要目录
     results_dir.mkdir(exist_ok=True)

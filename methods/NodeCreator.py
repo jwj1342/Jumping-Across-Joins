@@ -42,11 +42,8 @@ class NodeCreator:
     
     def create_schema_node(self, db_name: str, schema_name: str, description: str = "") -> bool:
         """创建模式节点"""
-        # 转义描述中的特殊字符
-        escaped_description = ""
-        if description:
-            truncated_desc = description[:500] + "..." if len(description) > 500 else description
-            escaped_description = truncated_desc.replace("\\", "\\\\").replace("'", "\\'").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
+        # 使用统一的转义方法
+        escaped_description = self._escape_string(description)
         
         cypher = templates.create_node.format(
             label="Schema",
@@ -83,16 +80,9 @@ class NodeCreator:
                           column_name: str, column_type: str, description: str = "", 
                           sample_data: str = "") -> bool:
         """创建列节点"""
-        # 转义单引号、双引号和换行符，并限制长度
-        escaped_description = ""
-        if description:
-            truncated_desc = description[:200] + "..." if len(description) > 200 else description
-            escaped_description = truncated_desc.replace("\\", "\\\\").replace("'", "\\'").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
-        
-        escaped_sample = ""
-        if sample_data:
-            truncated_sample = sample_data[:300] + "..." if len(sample_data) > 300 else sample_data
-            escaped_sample = truncated_sample.replace("\\", "\\\\").replace("'", "\\'").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
+        # 使用统一的转义方法
+        escaped_description = self._escape_string(description)
+        escaped_sample = self._escape_string(sample_data)
         
         cypher = templates.create_node.format(
             label="Column",
@@ -123,22 +113,14 @@ class NodeCreator:
                          group_name: str, description: str = "", sample_data: str = "") -> bool:
         """创建共享字段节点（专门用于SharedFieldGroup，包含字段组标识）"""
         try:
-            # 增强字符转义处理
+            # 使用统一的转义处理
             escaped_field_name = self._escape_string(field_name)
             escaped_field_type = self._escape_string(field_type)
             escaped_db_name = self._escape_string(db_name)
             escaped_schema_name = self._escape_string(schema_name)
             escaped_group_name = self._escape_string(group_name)
-            
-            escaped_description = ""
-            if description:
-                truncated_desc = description[:200] + "..." if len(description) > 200 else description
-                escaped_description = self._escape_string(truncated_desc)
-            
-            escaped_sample = ""
-            if sample_data:
-                truncated_sample = sample_data[:100] + "..." if len(sample_data) > 100 else sample_data
-                escaped_sample = self._escape_string(truncated_sample)
+            escaped_description = self._escape_string(description)
+            escaped_sample = self._escape_string(sample_data)
             
             cypher = templates.create_node.format(
                 label="Field",
@@ -155,45 +137,51 @@ class NodeCreator:
             return False
     
     def _escape_string(self, text: str) -> str:
-        """增强的字符串转义方法，处理Cypher查询中的特殊字符"""
+        """超强力字符串转义方法，彻底解决Cypher查询中的特殊字符问题"""
         if not text:
             return ""
         
-        # 移除或替换可能导致问题的字符
+        # 转换为字符串并限制长度
         cleaned_text = str(text)
+        if len(cleaned_text) > 500:
+            cleaned_text = cleaned_text[:500] + "..."
         
-        # 转义特殊字符
-        escape_map = {
-            "\\": "\\\\",  # 反斜杠
-            "'": "\\'",    # 单引号
-            '"': '\\"',    # 双引号
-            "\n": "\\n",   # 换行符
-            "\r": "\\r",   # 回车符
-            "\t": "\\t",   # 制表符
-            "\b": "\\b",   # 退格符
-            "\f": "\\f",   # 换页符
-        }
+        # 第一步：移除所有控制字符和不可见字符
+        import re
+        # 移除所有ASCII控制字符 (0-31) 和 DEL (127)
+        cleaned_text = re.sub(r'[\x00-\x1f\x7f]', ' ', cleaned_text)
         
-        for char, escaped in escape_map.items():
-            cleaned_text = cleaned_text.replace(char, escaped)
+        # 第二步：转义所有可能导致问题的字符
+        # 使用更激进的转义策略
+        cleaned_text = cleaned_text.replace('\\', '\\\\')  # 反斜杠
+        cleaned_text = cleaned_text.replace("'", "\\'")    # 单引号
+        cleaned_text = cleaned_text.replace('"', '\\"')    # 双引号
         
-        # 移除其他控制字符
-        cleaned_text = ''.join(c for c in cleaned_text if ord(c) >= 32 or c in ['\t', '\n', '\r'])
+        # 第三步：确保没有任何换行符残留
+        cleaned_text = cleaned_text.replace('\n', ' ')     # 换行符
+        cleaned_text = cleaned_text.replace('\r', ' ')     # 回车符
+        cleaned_text = cleaned_text.replace('\t', ' ')     # 制表符
+        
+        # 第四步：处理Unicode换行符
+        cleaned_text = cleaned_text.replace('\u2028', ' ')  # 行分隔符
+        cleaned_text = cleaned_text.replace('\u2029', ' ')  # 段落分隔符
+        
+        # 第五步：清理多余的空格
+        cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
+        
+        # 第六步：最后安全检查 - 如果仍包含问题字符，直接移除
+        if any(ord(c) < 32 for c in cleaned_text):
+            cleaned_text = ''.join(c if ord(c) >= 32 else ' ' for c in cleaned_text)
+            cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
         
         return cleaned_text
     
     def create_field_node(self, field_name: str, field_type: str, db_name: str, schema_name: str, 
                          table_name: str, description: str = "", sample_data: str = "") -> bool:
         """创建字段节点（独有字段，包含表名以确保唯一性）"""
-        escaped_description = ""
-        if description:
-            truncated_desc = description[:200] + "..." if len(description) > 200 else description
-            escaped_description = truncated_desc.replace("\\", "\\\\").replace("'", "\\'").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
-        
-        escaped_sample = ""
-        if sample_data:
-            truncated_sample = sample_data[:100] + "..." if len(sample_data) > 100 else sample_data
-            escaped_sample = truncated_sample.replace("\\", "\\\\").replace("'", "\\'").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
+        # 使用统一的转义方法
+        escaped_description = self._escape_string(description)
+        escaped_sample = self._escape_string(sample_data)
         
         cypher = templates.create_node.format(
             label="Field",

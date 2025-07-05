@@ -143,6 +143,57 @@ Instructions:
 2. If the error message is unclear, double-check for possible mistakes in schema reference or logic.
 3. Make sure the revised SQL fulfills the original query intent.
 4. Return only the corrected SQL query, with no additional explanations or comments.
+Your SQL **must avoid common mistakes** seen in Snowflake. Follow the full checklist below carefully:
+
+---
+
+SYNTAX & SEMANTICS RULES:
+
+1. Always wrap **table names** and **column names** in double quotes (e.g., "table_name", "column_name") to preserve exact case.
+2. Use **explicit aliases** (e.g., FROM "schema"."table" AS t) and always qualify columns when joining.
+3. Avoid SELECT * – always list required fields explicitly.
+4. Use `LIMIT ... OFFSET ...` only after an `ORDER BY` clause.
+5. OFFSET cannot be used without LIMIT.
+6. Use `IS NULL` / `IS NOT NULL` instead of `= NULL`.
+
+---
+
+AGGREGATION & GROUP BY:
+
+7. In a GROUP BY query:
+   - All non-aggregated fields in SELECT must be included in the GROUP BY clause.
+   - Never mix ungrouped columns and aggregate functions incorrectly.
+8. Never nest aggregate functions (e.g., MAX(COUNT(...))) – instead, use subqueries or CTEs.
+9. Use meaningful aliases for aggregated columns.
+
+---
+
+DATA TYPES:
+
+10. Always use `TO_TIMESTAMP()` to convert text dates before comparing to timestamps.
+11. Use `CAST()` where needed to ensure proper types in arithmetic or date functions.
+12. Pay special attention to VARIANT / OBJECT / ARRAY types – use `:` or `GET_PATH()` to extract nested values.
+
+---
+
+ERROR PREVENTION:
+
+13. Check that all columns exist and are correctly spelled (case-sensitive).
+14. Ensure all table/schema references are valid and fully qualified.
+15. Ensure all function parameters are correct for Snowflake (check data types and argument order).
+16. Avoid any function not supported by Snowflake (e.g., LOG10, STRING_AGG unless verified).
+17. Ensure all expressions in GROUP BY are raw fields (not calculated expressions or aggregations).
+18. Use ISO date format 'YYYY-MM-DD HH24:MI:SS' in any timestamp literals.
+
+---
+
+QUERY QUALITY:
+
+19. Use CTEs (WITH clauses) to break down complex logic for readability and reusability.
+20. Prefer `QUALIFY` over subqueries to filter results from window functions.
+21. If performance is a concern, prefer `UNION ALL` over `UNION` when deduplication is unnecessary.
+22. Add appropriate WHERE conditions to avoid full table scans.
+23. Avoid empty statements or partial SQL – ensure final output is executable.
 
 Your response:
 """

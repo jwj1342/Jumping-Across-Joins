@@ -91,22 +91,42 @@ class RelationshipCreator:
             return False
     
     def _escape_string(self, text: str) -> str:
-        """字符串转义方法，处理Cypher查询中的特殊字符"""
+        """超强力字符串转义方法，与NodeCreator保持一致"""
         if not text:
             return ""
         
+        # 转换为字符串并限制长度
         cleaned_text = str(text)
-        escape_map = {
-            "\\": "\\\\",
-            "'": "\\'",
-            '"': '\\"',
-            "\n": "\\n",
-            "\r": "\\r",
-            "\t": "\\t",
-        }
+        if len(cleaned_text) > 500:
+            cleaned_text = cleaned_text[:500] + "..."
         
-        for char, escaped in escape_map.items():
-            cleaned_text = cleaned_text.replace(char, escaped)
+        # 第一步：移除所有控制字符和不可见字符
+        import re
+        # 移除所有ASCII控制字符 (0-31) 和 DEL (127)
+        cleaned_text = re.sub(r'[\x00-\x1f\x7f]', ' ', cleaned_text)
+        
+        # 第二步：转义所有可能导致问题的字符
+        # 使用更激进的转义策略
+        cleaned_text = cleaned_text.replace('\\', '\\\\')  # 反斜杠
+        cleaned_text = cleaned_text.replace("'", "\\'")    # 单引号
+        cleaned_text = cleaned_text.replace('"', '\\"')    # 双引号
+        
+        # 第三步：确保没有任何换行符残留
+        cleaned_text = cleaned_text.replace('\n', ' ')     # 换行符
+        cleaned_text = cleaned_text.replace('\r', ' ')     # 回车符
+        cleaned_text = cleaned_text.replace('\t', ' ')     # 制表符
+        
+        # 第四步：处理Unicode换行符
+        cleaned_text = cleaned_text.replace('\u2028', ' ')  # 行分隔符
+        cleaned_text = cleaned_text.replace('\u2029', ' ')  # 段落分隔符
+        
+        # 第五步：清理多余的空格
+        cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
+        
+        # 第六步：最后安全检查 - 如果仍包含问题字符，直接移除
+        if any(ord(c) < 32 for c in cleaned_text):
+            cleaned_text = ''.join(c if ord(c) >= 32 else ' ' for c in cleaned_text)
+            cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
         
         return cleaned_text
     
