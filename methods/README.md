@@ -4,11 +4,11 @@
 
 ```
 methods/
-├── GraphBuild.py          # 核心协调模块 (327行)
-├── NodeCreator.py         # 节点创建模块 (168行)
-├── RelationshipCreator.py # 关系创建模块 (74行)
-├── GraphValidator.py      # 验证统计模块 (236行)
-├── GraphUtils.py          # 辅助工具模块 (89行)
+├── GraphBuild.py          # 核心协调模块 (379行) - 精确匹配模式
+├── NodeCreator.py         # 节点创建模块 (207行) - 支持表名属性
+├── RelationshipCreator.py # 关系创建模块 (126行) - 精确字段匹配
+├── GraphValidator.py      # 验证统计模块 (279行) - 增强验证逻辑
+├── GraphUtils.py          # 辅助工具模块 (320行) - 新增FieldGroupOptimizer
 ├── CypherTemplate.py      # Cypher模板 (89行)
 └── TestTemplate.py        # 测试模板 (289行)
 ```
@@ -16,8 +16,6 @@ methods/
 ## 📖 模块详细说明
 
 ### 1. GraphBuild.py - 核心协调模块
-
-**原始行数**: 871 行 → **重构后**: 327 行 (-62%)
 
 **主要职责**：
 
@@ -39,8 +37,6 @@ def clear_existing_graph(self) -> bool
 ```
 
 ### 2. NodeCreator.py - 节点创建模块
-
-**行数**: 168 行
 
 **主要职责**：
 
@@ -64,8 +60,6 @@ def create_field_node(...) -> bool
 
 ### 3. RelationshipCreator.py - 关系创建模块
 
-**行数**: 74 行
-
 **主要职责**：
 
 - 🔗 **数据库-模式关系**：HAS_SCHEMA
@@ -85,8 +79,6 @@ def create_table_has_field_relationship(self, table_name: str, field_name: str, 
 ```
 
 ### 4. GraphValidator.py - 验证统计模块
-
-**行数**: 236 行
 
 **主要职责**：
 
@@ -114,29 +106,45 @@ def print_graph_summary(self) -> None
 
 ### 5. GraphUtils.py - 辅助工具模块
 
-**行数**: 89 行
-
 **主要职责**：
 
+#### 基础工具功能
+
 - 🔐 **字段组哈希计算**：识别相同字段组合
-- 🏷️ **字段组命名**：生成标准化字段组名称
+- 🏷️ **字段组命名**：生成标准化字段组名称（支持哈希后缀）
 - 📄 **DDL 信息加载**：从 CSV 文件加载 DDL 信息
 - 🎯 **样本数据提取**：提取字段示例数据
-- 🔍 **字段组查找**：在共享字段组中查找特定字段
+- 🔍 **字段组查找**：精确字段集合匹配和传统字段查找
+
+#### 新增核心功能：FieldGroupOptimizer
+
+- 🧠 **智能字段组优化**：精确字段集合匹配算法
+- 📊 **最小覆盖算法**：选择最优的不重叠字段组集合
+- 🔍 **包含关系分析**：构建字段组之间的包含关系图
+- ✅ **完整性验证**：验证精确匹配结果
 
 **核心方法**：
+
+#### GraphUtils 基础方法
 
 ```python
 @staticmethod
 def calculate_field_group_hash(column_names: List[str], column_types: List[str]) -> str
 @staticmethod
-def generate_field_group_name(representative_table: str, schema_name: str, field_count: int) -> str
+def generate_field_group_name(representative_table: str, schema_name: str, field_count: int, field_hash: str) -> str
 @staticmethod
-def load_ddl_info(ddl_file_path: str) -> Dict[str, str]
-@staticmethod
-def extract_sample_data(sample_rows: List[Dict], column_name: str, max_samples: int) -> str
+def find_exact_matching_field_group(table_fields: List[tuple], schema_name: str, field_groups: Dict) -> Optional[str]
 @staticmethod
 def find_field_in_shared_groups(field_name: str, field_type: str, schema_name: str, field_groups: Dict) -> Optional[str]
+```
+
+#### FieldGroupOptimizer 优化器方法
+
+```python
+def optimize_field_groups_with_exact_matching(self, field_groups_data: Dict[str, List]) -> Dict[str, Dict]
+def _analyze_combinations_by_schema(self, field_groups_data: Dict[str, List]) -> Dict[str, List[Dict]]
+def _select_minimal_covering_set(self, schema_name: str, combinations: List[Dict]) -> Dict[str, Dict]
+def _validate_exact_matching(self, optimal_groups: Dict[str, Dict], original_data: Dict[str, List]) -> bool
 ```
 
 ## 🏛️ 架构设计
@@ -165,7 +173,7 @@ GraphBuild (核心协调)
 
 1. **输入**：数据库 JSON 元数据文件
 2. **处理**：四阶段构建流程
-3. **输出**：Neo4j 知识图谱
+3. **输出**：Neo4j 数据库结构图
 
 ## 🚀 使用方法
 
@@ -204,16 +212,174 @@ if success:
 builder.close()
 ```
 
-## 📊 重构效果对比
+## 🧠 核心算法设计
 
-| 指标           | 重构前        | 重构后          | 改善     |
-| -------------- | ------------- | --------------- | -------- |
-| **主文件行数** | 871 行        | 327 行          | -62%     |
-| **单一职责**   | ❌ 多职责混合 | ✅ 职责清晰分离 | 显著改善 |
-| **可维护性**   | ⚠️ 难以维护   | ✅ 易于维护     | 显著改善 |
-| **可测试性**   | ⚠️ 难以测试   | ✅ 易于单元测试 | 显著改善 |
-| **扩展性**     | ⚠️ 扩展困难   | ✅ 易于扩展     | 显著改善 |
-| **代码复用**   | ⚠️ 复用性差   | ✅ 高复用性     | 显著改善 |
+### 🛠️ 解决方案：最小子集精确匹配
+
+**核心思想**：表只能连接到与其字段集合**完全匹配**的字段组。
+
+#### 1. FieldGroupOptimizer 优化器
+
+```python
+class FieldGroupOptimizer:
+    def optimize_field_groups_with_exact_matching(self, field_groups_data):
+        """精确匹配优化器 - 最小子集解决方案"""
+        # 第一步：按模式分析字段组合
+        schema_combinations = self._analyze_combinations_by_schema(field_groups_data)
+
+        # 第二步：选择最小覆盖字段组集合
+        optimal_groups = {}
+        for schema_name, combinations in schema_combinations.items():
+            schema_optimal = self._select_minimal_covering_set(schema_name, combinations)
+            optimal_groups.update(schema_optimal)
+
+        # 第三步：验证精确匹配
+        self._validate_exact_matching(optimal_groups, field_groups_data)
+
+        return optimal_groups
+```
+
+#### 2. 最小覆盖算法
+
+```python
+def _select_minimal_covering_set(self, schema_name, combinations):
+    """贪心算法选择最小覆盖字段组集合"""
+    selected_groups = {}
+    covered_tables = set()
+
+    # 按表数量和字段数量排序，优先选择覆盖更多表的字段组
+    combinations.sort(key=lambda x: (x['table_count'], x['field_count']), reverse=True)
+
+    for combo in combinations:
+        # 检查字段集合冲突
+        has_conflict = False
+        for selected_info in selected_groups.values():
+            selected_set = selected_info['field_set']
+            combo_set = combo['field_set']
+
+            # 如果字段集合有重叠且不完全相同，则有冲突
+            if (len(selected_set.intersection(combo_set)) > 0 and
+                selected_set != combo_set):
+                has_conflict = True
+                break
+
+        if not has_conflict:
+            # 计算新增覆盖的表数量
+            new_tables = combo_tables - covered_tables
+            if len(new_tables) > 0:
+                selected_groups[field_hash] = combo_info
+                covered_tables.update(combo_tables)
+```
+
+#### 3. 精确字段集合匹配
+
+```python
+@staticmethod
+def find_exact_matching_field_group(table_fields, schema_name, field_groups):
+    """查找与表字段集合完全匹配的字段组"""
+    # 构建表的字段集合
+    table_field_set = set(f"{name}:{type_}" for name, type_ in table_fields)
+
+    for field_hash, group_info in field_groups.items():
+        if group_info['schema'] == schema_name:
+            # 构建字段组的字段集合
+            group_field_set = set(f"{col_name}:{col_type}" for ...)
+
+            # 精确匹配：字段集合必须完全相同
+            if table_field_set == group_field_set:
+                return group_info['group_name']
+
+    return None  # 没有找到精确匹配
+```
+
+#### 4. 精确关系创建
+
+```python
+def create_table_field_relationships_mixed_mode(self, table_info, table_name, schema_name, db_name):
+    """精确匹配模式的字段关系创建"""
+    # 构建表的完整字段列表
+    table_fields = [(col_name, col_type) for col_name, col_type in zip(column_names, column_types)]
+
+    # 尝试找到精确匹配的字段组
+    exact_matching_group = self.utils.find_exact_matching_field_group(table_fields, schema_name, self.field_groups)
+
+    if exact_matching_group:
+        # ✓ 精确匹配：创建表->字段组关系
+        self.relationship_creator.create_uses_field_group_relationship(table_name, exact_matching_group, schema_name)
+        shared_fields_count = len(column_names)
+    else:
+        # ✗ 无匹配：所有字段作为独有字段处理
+        for col_name, col_type in table_fields:
+            self.node_creator.create_field_node(col_name, col_type, db_name, schema_name, table_name, ...)
+            unique_fields_count += 1
+```
+
+### 🔒 算法保障
+
+#### 完整性验证
+
+```python
+def _validate_exact_matching(self, optimal_groups, original_data):
+    """验证精确匹配结果"""
+    validation_errors = []
+
+    for field_hash, group_info in optimal_groups.items():
+        group_field_set = group_info['field_set']
+
+        # 检查每个表的字段集合是否与字段组完全匹配
+        for table_info in original_data[field_hash]:
+            table_field_set = set(f"{name}:{type_}" for ...)
+
+            if table_field_set != group_field_set:
+                validation_errors.append(f"表字段集合与字段组不完全匹配")
+
+    return len(validation_errors) == 0
+```
+
+#### 📊 算法优势对比
+
+| 方面              | 传统算法（有问题）         | 精确匹配算法（解决方案）  |
+| ----------------- | -------------------------- | ------------------------- |
+| **匹配策略**      | 逐字段包含匹配             | 完整字段集合精确匹配      |
+| **表-字段组关系** | 可能连接到包含额外字段的组 | 只连接到完全匹配的字段组  |
+| **字段访问安全**  | ❌ 可能访问不存在的字段    | ✅ 只能访问确实拥有的字段 |
+| **算法复杂度**    | O(n×m) 简单但有缺陷        | O(n×m×log(k)) 智能且准确  |
+| **字段组重叠**    | ❌ 允许重叠，导致冲突      | ✅ 完全不重叠             |
+| **验证机制**      | ❌ 缺少完整性验证          | ✅ 完整的精确匹配验证     |
+
+## 🔄 算法流程图
+
+```
+输入：数据库表结构元数据
+  ↓
+第一步：分析字段组合，按模式分组
+  ↓
+第二步：构建字段集合包含关系图
+  ↓
+第三步：贪心算法选择最小覆盖字段组集合
+  ├── 检查字段集合冲突
+  ├── 优先选择覆盖更多表的字段组
+  └── 避免字段组重叠
+  ↓
+第四步：精确匹配表与字段组
+  ├── 构建表的完整字段集合
+  ├── 查找完全匹配的字段组
+  └── 创建精确的连接关系
+  ↓
+第五步：验证精确匹配完整性
+  ├── 检查字段集合一致性
+  ├── 统计覆盖率
+  └── 报告验证结果
+  ↓
+输出：精确、不重叠的字段组知识图谱
+```
+
+### 关键设计原则
+
+1. **精确性优于覆盖率**：宁可创建独有字段，也不允许错误的字段组连接
+2. **最小化原则**：选择最少数量的字段组来覆盖所有表
+3. **完整性验证**：每个连接关系都必须经过严格验证
+4. **可追溯性**：详细的日志记录便于调试和验证
 
 ## 🎯 支持的图模型
 
@@ -236,11 +402,12 @@ builder.close()
 
 ## 📈 特性优势
 
-### 🔄 混合建模模式
+### 🎯 精确匹配建模模式
 
-- **共享字段组**：多表共享的字段组合（≥2 个字段，≥2 个表）
-- **独有字段**：表特有的字段
-- **自动识别**：智能判断字段是否应该共享
+- **精确共享字段组**：多表完全相同的字段组合（≥2 个字段，≥2 个表，字段集合完全匹配）
+- **独有字段**：无法精确匹配任何字段组的表字段
+- **智能优化**：使用最小覆盖算法选择最优字段组集合
+- **安全保障**：确保表只能访问其真正拥有的字段
 
 ### 🔍 完整性验证
 
@@ -254,12 +421,3 @@ builder.close()
 - **关系统计**：各类型关系数量
 - **复用分析**：字段复用率统计
 - **示例查询**：常用查询结果展示
-
-## 🛠️ 开发指南
-
-### 扩展新功能
-
-1. **新节点类型**：在 NodeCreator 中添加创建方法
-2. **新关系类型**：在 RelationshipCreator 中添加关系方法
-3. **新验证规则**：在 GraphValidator 中添加验证逻辑
-4. **新工具函数**：在 GraphUtils 中添加静态方法

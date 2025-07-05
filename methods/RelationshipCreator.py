@@ -112,15 +112,19 @@ class RelationshipCreator:
     
     def create_table_has_field_relationship(self, table_name: str, field_name: str, schema: str, field_key: str) -> bool:
         """创建表直接拥有字段的关系（用于独有字段）"""
-        # 使用更精确的匹配条件，确保只连接到独有字段节点
-        # 通过node_type区分共享字段和独有字段
+        # 使用表名进行精确匹配，确保只连接到属于该表的独有字段节点
+        # 通过table属性确保字段与表的精确对应关系
         cypher = templates.create_relationship.format(
             label1="Table",
             match1=f"name: '{table_name}', schema: '{schema}'",
             label2="Field",
-            match2=f"name: '{field_name}', schema: '{schema}', node_type: 'unique_field'",
+            match2=f"name: '{field_name}', schema: '{schema}', table: '{table_name}', node_type: 'unique_field'",
             rel_type="HAS_UNIQUE_FIELD",
             rel_properties="type: 'has_unique_field'"
         )
         success, result = self.executor.execute_transactional_cypher(cypher)
+        if success:
+            logger.debug(f"RelationshipCreator: 创建表-字段关系: {table_name} -> {field_name}")
+        else:
+            logger.error(f"RelationshipCreator: 创建表-字段关系失败: {table_name} -> {field_name}")
         return success 

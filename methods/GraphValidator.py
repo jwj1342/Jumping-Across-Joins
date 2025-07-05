@@ -84,32 +84,40 @@ class GraphValidator:
         MATCH (f:Field)
         WHERE NOT EXISTS((:SharedFieldGroup)-[:HAS_FIELD]->(f)) 
           AND NOT EXISTS((:Table)-[:HAS_UNIQUE_FIELD]->(f))
-        RETURN f.name AS field_name, f.schema AS schema, f.node_type AS node_type
+        RETURN f.name AS field_name, f.schema AS schema, f.node_type AS node_type, f.table AS table_name
         """
         success, result = self.executor.execute_transactional_cypher(orphaned_fields_cypher)
         if success and result:
             for record in result:
                 node_type = record.get('node_type', 'unknown')
-                issues_found.append(f"❌ 孤立字段 '{record['schema']}.{record['field_name']}' ({node_type}) 没有被引用")
+                table_name = record.get('table_name', 'unknown')
+                field_identifier = f"{record['schema']}.{record['field_name']}"
+                if node_type == 'unique_field' and table_name:
+                    field_identifier += f" (表: {table_name})"
+                issues_found.append(f"❌ 孤立字段 '{field_identifier}' ({node_type}) 没有被引用")
         
         # 4.1 检查是否有字段同时被SharedFieldGroup和Table直接引用（重复连接）
         duplicate_references_cypher = """
         MATCH (f:Field)<-[:HAS_FIELD]-(sfg:SharedFieldGroup),
               (f)<-[:HAS_UNIQUE_FIELD]-(t:Table)
-        RETURN f.name AS field_name, f.schema AS schema, f.node_type AS node_type,
+        RETURN f.name AS field_name, f.schema AS schema, f.node_type AS node_type, f.table AS field_table,
                sfg.name AS group_name, t.name AS table_name
         """
         success, result = self.executor.execute_transactional_cypher(duplicate_references_cypher)
         if success and result:
             for record in result:
-                issues_found.append(f"❌ 字段 '{record['schema']}.{record['field_name']}' 同时被共享字段组 '{record['group_name']}' 和表 '{record['table_name']}' 引用")
+                field_table = record.get('field_table', 'unknown')
+                field_identifier = f"{record['schema']}.{record['field_name']}"
+                if field_table:
+                    field_identifier += f" (表: {field_table})"
+                issues_found.append(f"❌ 字段 '{field_identifier}' 同时被共享字段组 '{record['group_name']}' 和表 '{record['table_name']}' 引用")
         
         # 4.2 检查是否有字段被多个SharedFieldGroup引用（违反独立性原则）
         multi_group_references_cypher = """
         MATCH (f:Field)<-[:HAS_FIELD]-(sfg:SharedFieldGroup)
         WITH f, COUNT(sfg) as group_count, COLLECT(sfg.name) as group_names
         WHERE group_count > 1
-        RETURN f.name AS field_name, f.schema AS schema, f.field_group AS expected_group, 
+        RETURN f.name AS field_name, f.schema AS schema, f.field_group AS expected_group, f.table AS field_table,
                group_count, group_names
         """
         success, result = self.executor.execute_transactional_cypher(multi_group_references_cypher)
@@ -117,10 +125,14 @@ class GraphValidator:
             for record in result:
                 field_name = record['field_name']
                 schema = record['schema']
+                field_table = record.get('field_table', 'unknown')
                 expected_group = record.get('expected_group', 'unknown')
                 group_count = record['group_count']
                 group_names = record['group_names']
-                issues_found.append(f"❌ 字段 '{schema}.{field_name}' 被 {group_count} 个字段组引用: {group_names}，但应该只属于: {expected_group}")
+                field_identifier = f"{schema}.{field_name}"
+                if field_table:
+                    field_identifier += f" (表: {field_table})"
+                issues_found.append(f"❌ 字段 '{field_identifier}' 被 {group_count} 个字段组引用: {group_names}，但应该只属于: {expected_group}")
         
         # 报告验证结果
         if issues_found:

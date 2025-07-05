@@ -183,8 +183,8 @@ class NodeCreator:
         return cleaned_text
     
     def create_field_node(self, field_name: str, field_type: str, db_name: str, schema_name: str, 
-                         description: str = "", sample_data: str = "") -> bool:
-        """创建字段节点"""
+                         table_name: str, description: str = "", sample_data: str = "") -> bool:
+        """创建字段节点（独有字段，包含表名以确保唯一性）"""
         escaped_description = ""
         if description:
             truncated_desc = description[:200] + "..." if len(description) > 200 else description
@@ -197,11 +197,11 @@ class NodeCreator:
         
         cypher = templates.create_node.format(
             label="Field",
-            properties=f"name: '{field_name}', type: '{field_type}', database: '{db_name}', schema: '{schema_name}', description: '{escaped_description}', sample_data: '{escaped_sample}', node_type: 'unique_field'"
+            properties=f"name: '{field_name}', type: '{field_type}', database: '{db_name}', schema: '{schema_name}', table: '{table_name}', description: '{escaped_description}', sample_data: '{escaped_sample}', node_type: 'unique_field'"
         )
         success, result = self.executor.execute_transactional_cypher(cypher)
         if success:
-            logger.debug(f"NodeCreator: 创建字段节点: {field_name} ({field_type})")
+            logger.debug(f"NodeCreator: 创建独有字段节点: {field_name} ({field_type}) -> {table_name}")
         else:
-            logger.error(f"NodeCreator: 创建字段节点失败: {field_name}")
+            logger.error(f"NodeCreator: 创建独有字段节点失败: {field_name}")
         return success 
