@@ -12,10 +12,11 @@ import logging
 import threading
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
-from typing import Dict, List, Optional, Tuple
-from langchain.chat_models import init_chat_model
+from typing import Dict, List, Tuple
+
 import tempfile
 import shutil
+from utils.init_llm import initialize_llm
 from prompts import baseline_prompt_v2 as baseline_prompt
 from langchain.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -297,35 +298,7 @@ def process_single_query(
             with log_lock:
                 logging.warning(f"清理线程工作目录失败: {e}")
 
-def initialize_llm() :
-    """
-    初始化LLM实例
-    
-    Returns:
-        LLM实例或None
-    """
-    # 读取环境变量
-    model = os.getenv("LLM_MODEL") or "gpt-4o-mini"
-    
-    
-    try:
-        
-        llm = init_chat_model(model=model, model_provider="openai")
-        # 测试LLM连接（简化测试）
-        try:
-            test_result = llm.invoke("Hello")
-            if test_result:
-                logging.info(f"LLM连接测试成功")
-            else:
-                logging.warning("LLM连接测试返回空结果")
-        except Exception as e:
-            logging.warning(f"LLM连接测试失败，但继续运行: {e}")
-        
-        return llm
-        
-    except Exception as e:
-        logging.error(f"LLM初始化失败: {e}")
-        return None
+
 
 def load_queries(input_file: Path) -> List[Dict]:
     """

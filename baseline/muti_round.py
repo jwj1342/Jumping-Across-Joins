@@ -11,7 +11,7 @@ import time
 import logging
 import threading
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Tuple
 from dotenv import load_dotenv
 from langchain.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -22,7 +22,6 @@ load_dotenv(".env")
 # 导入单轮系统的功能
 from single_round import (
     SQLGenerationChain,
-    initialize_llm,
     load_database_info,
     load_queries,
     validate_environment,
@@ -30,7 +29,7 @@ from single_round import (
     file_lock,
     log_lock
 )
-
+from utils.init_llm import initialize_llm
 # 导入Snowflake连接模块
 import sys
 # 将项目根目录添加到Python路径中
