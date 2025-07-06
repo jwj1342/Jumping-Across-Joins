@@ -10,7 +10,7 @@ from typing import Dict, Any
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.CypherExecutor import CypherExecutor
-import methods.CypherTemplate as templates
+import db2graph.CypherTemplate as templates
 
 # 创建带有模块名的logger
 logger = logging.getLogger(__name__)

@@ -17,7 +17,17 @@ pytest-mock>=3.10.0
 # LangChain相关依赖
 langchain>=0.1.0
 langchain-openai>=0.1.0
+langchain-core>=0.1.0
+langchain-anthropic>=0.1.0
 openai>=1.0.0
+
+# LangGraph核心依赖
+langgraph>=0.2.0
+langgraph-checkpoint>=1.0.0
+
+# 类型注解和数据验证
+pydantic>=2.0.0
+typing-extensions>=4.0.0
 
 # JSON处理
 jsonlines>=3.0.0

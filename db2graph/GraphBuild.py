@@ -8,10 +8,10 @@ from collections import defaultdict
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.CypherExecutor import CypherExecutor
-from methods.NodeCreator import NodeCreator
-from methods.RelationshipCreator import RelationshipCreator
-from methods.GraphValidator import GraphValidator
-from methods.GraphUtils import GraphUtils, FieldGroupOptimizer
+from db2graph.NodeCreator import NodeCreator
+from db2graph.RelationshipCreator import RelationshipCreator
+from db2graph.GraphValidator import GraphValidator
+from db2graph.GraphUtils import GraphUtils, FieldGroupOptimizer
 
 # 配置日志
 logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(levelname)s - %(message)s')
