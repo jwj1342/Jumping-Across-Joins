@@ -1,578 +1,464 @@
 """
-InfoAgent 的目标可以拆解为：
-1. 面向用Query的问题相关性：不是全盘扫描所有结构，而是以Query为导向，收集相关表/字段的信息。
-2. 结构摘要压缩（高信息熵）：把图结构压缩成SQLAgent可理解的自然语言描述或结构化摘要。
-3. 错误驱动的结构补全：当SQLAgent失败时，自动对图结构进行局部拓展以获取缺失信息。
-InfoAgent 可以实现的 API 接口
-- get_all_tables()：返回全部表及字段
-- get_table_fields(table_name)：返回指定表的字段
-- find_tables_by_field(field_name)：字段反向查表
-- summarize_related_schema(keywords: List[str])：根据query关键词生成相关schema描述
-- suggest_similar_fields(field_name)：根据错误字段提示推荐相似字段及其所在表
-
-其中需要注意的有两点
-1. 信息压缩策略（高信息熵文本生成）
-2. 错误反馈后的增量探索：SQLAgent在执行出错后，InfoAgent可以根据错误提示反向定位相关字段或表，并：动态拓展图结构探索范围（例如只初始探索部分schema，出错后拓展更多）以及补充字段来源：如出错信息是"column X not found"，则 InfoAgent 应查询图中是否有字段名相似的Field节点，并返回其所属表。
+InfoAgent - 纯函数式实现
+将InfoAgent的功能转换为简单的函数，避免类和复杂状态管理
 """
 
-import re
 import json
 import logging
 import sys
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple
-from difflib import SequenceMatcher
+from typing import Dict, Any, List
 
-# 添加项目根目录到路径，以便导入utils模块
+# 添加项目根目录到路径
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from utils.CypherExecutor import CypherExecutor
-from utils.SnowConnect import snowflake_sql_query
-from utils.sql_templates import *
 from utils.init_llm import initialize_llm
-from prompts import INFO_AGENT_PROMPT, SCHEMA_SUMMARY_PROMPT, ERROR_ANALYSIS_PROMPT
-from Communicate import (
-    SystemState, InfoRequest, InfoResponse, InteractionType,
-    get_current_schema_summary
-)
+from prompts import TABLE_USEFULNESS_PROMPT, FIELD_USEFULNESS_PROMPT
+
+# 全局资源 - 延迟初始化
+_cypher_executor = None
+_llm = None
+_logger = logging.getLogger(__name__)
 
 
-class InfoAgent:
+def _get_cypher_executor():
+    """获取全局CypherExecutor实例"""
+    global _cypher_executor
+    if _cypher_executor is None:
+        _cypher_executor = CypherExecutor(enable_info_logging=False)
+    return _cypher_executor
+
+
+def _get_llm():
+    """获取全局LLM实例"""
+    global _llm
+    if _llm is None:
+        _llm = initialize_llm()
+    return _llm
+
+
+# ===== 核心函数式API =====
+
+def get_all_tables(database_id: str) -> Dict[str, Any]:
     """
-    数据库Schema信息探索Agent
-    负责从图数据库和Snowflake数据库中探索和收集相关的表结构信息
+    获取数据库中的所有表信息 - 函数式版本
+    
+    Args:
+        database_id: 数据库ID
+        
+    Returns:
+        包含所有表信息的字典
     """
-    
-    def __init__(self, enable_logging: bool = False):
+    try:
+        cypher_query = f"""
+        MATCH (d:Database {{name: '{database_id}'}})-[:HAS_SCHEMA]->(s:Schema)-[:HAS_TABLE]->(t:Table)
+        RETURN s.name as schema_name, t.name as table_name, t.type as table_type, 
+               t.created as created
         """
-        初始化InfoAgent
         
-        Args:
-            enable_logging: 是否启用日志
-        """
-        self.cypher_executor = CypherExecutor(enable_info_logging=enable_logging)
-        self.llm = initialize_llm()
-        self.logger = logging.getLogger(__name__)
-        if enable_logging:
-            logging.basicConfig(level=logging.INFO)
-            
-        # 缓存机制
-        self.schema_cache = {}
-        self.similarity_cache = {}
+        success, graph_results = _get_cypher_executor().execute_transactional_cypher(cypher_query)
         
-    def get_all_tables(self, database_id: str) -> Dict[str, Any]:
-        """
-        获取Neo4j数据库中的所有表信息
-        
-        Args:
-            database_id: 数据库ID
-            
-        Returns:
-            包含所有表信息的字典
-        """
-        try:
-            # 使用Cypher查询获取所有表信息
-            # 查找指定数据库下的所有Schema和Table
-            cypher_query = f"""
-            MATCH (d:Database {{name: '{database_id}'}})-[:HAS_SCHEMA]->(s:Schema)-[:HAS_TABLE]->(t:Table)
-            RETURN s.name as schema_name, t.name as table_name, t.type as table_type, 
-                   t.created as created, t.row_count as row_count
-            """
-            
-            success, graph_results = self.cypher_executor.execute_transactional_cypher(cypher_query)
-            
-            if not success or not graph_results:
-                self.logger.warning(f"未找到数据库 {database_id} 的表信息")
-                return {}
-            
-            all_tables = {}
-            for result in graph_results:
-                schema_name = result['schema_name']
-                table_name = result['table_name']
-                full_table_name = f"{schema_name}.{table_name}"
-                
-                all_tables[full_table_name] = {
-                    'schema': schema_name,
-                    'table': table_name,
-                    'type': result.get('table_type', 'BASE TABLE'),
-                    'created': result.get('created'),
-                    'row_count': result.get('row_count', 0)
-                }
-            
-            return all_tables
-            
-        except Exception as e:
-            self.logger.error(f"获取所有表信息失败: {e}")
+        if not success or not graph_results:
+            _logger.warning(f"未找到数据库 {database_id} 的表信息")
             return {}
-    
-    def get_table_fields(self, table_name: str, database_id: str) -> Dict[str, Any]:
-        """
-        获取指定表的字段信息
         
-        Args:
-            table_name: 表名（可能包含schema）
-            database_id: 数据库ID
+        all_tables = {}
+        for result in graph_results:
+            schema_name = result['schema_name']
+            table_name = result['table_name']
+            full_table_name = f"{schema_name}.{table_name}"
             
-        Returns:
-            包含表字段信息的字典
-        """
-        try:
-            # TODO：完善从neo4j中取出所有的filed的信息。
-            # # 解析表名
-            # if '.' in table_name:
-            #     schema_name, table_name_only = table_name.split('.', 1)
-            # else:
-            #     # 如果没有指定schema，尝试从所有schema中查找
-            #     schemas_result = snowflake_sql_query(GET_ALL_SCHEMAS, database_id)
-            #     schema_name = None
-            #     table_name_only = table_name
-                
-            #     for schema_row in schemas_result:
-            #         test_schema = schema_row['SCHEMA_NAME']
-            #         try:
-            #             test_sql = GET_TABLES_BASIC.format(schema_name=test_schema)
-            #             tables_in_schema = snowflake_sql_query(test_sql, database_id)
-                        
-            #             for table_row in tables_in_schema:
-            #                 if table_row['TABLE_NAME'].upper() == table_name.upper():
-            #                     schema_name = test_schema
-            #                     break
-                        
-            #             if schema_name:
-            #                 break
-            #         except:
-            #             continue
-                
-            #     if not schema_name:
-            #         raise ValueError(f"未找到表 {table_name}")
-            
-            # # 获取字段信息
-            # columns_sql = GET_COLUMNS_FOR_TABLE.format(
-            #     schema_name=schema_name, 
-            #     table_name=table_name_only
-            # )
-            # columns_result = snowflake_sql_query(columns_sql, database_id)
-            
-            # table_info = {
-            #     'schema': schema_name,
-            #     'table': table_name_only,
-            #     'fields': []
-            # }
-            
-            # for col_row in columns_result:
-            #     field_info = {
-            #         'name': col_row['COLUMN_NAME'],
-            #         'type': col_row['DATA_TYPE'],
-            #         'nullable': col_row['IS_NULLABLE'] == 'YES',
-            #         'position': col_row['ORDINAL_POSITION'],
-            #         'default': col_row.get('COLUMN_DEFAULT'),
-            #         'max_length': col_row.get('CHARACTER_MAXIMUM_LENGTH'),
-            #         'precision': col_row.get('NUMERIC_PRECISION'),
-            #         'scale': col_row.get('NUMERIC_SCALE')
-            #     }
-            #     table_info['fields'].append(field_info)
-            
-            # 直接返回表信息，不需要写入图数据库
-            return table_info
-            
-        except Exception as e:
-            self.logger.error(f"获取表 {table_name} 字段信息失败: {e}")
+            all_tables[full_table_name] = {
+                'schema': schema_name,
+                'table': table_name,
+                'type': result.get('table_type', 'BASE TABLE'),
+                'created': result.get('created'),
+                'row_count': 'unknown'  # 避免使用不存在的属性
+            }
+        
+        return all_tables
+        
+    except Exception as e:
+        _logger.error(f"获取所有表信息失败: {e}")
+        return {}
+
+
+def get_table_fields(table_name: str, database_id: str) -> Dict[str, Any]:
+    """
+    获取指定表的字段信息 - 函数式版本
+    
+    Args:
+        table_name: 表名（格式：schema.table）
+        database_id: 数据库ID
+        
+    Returns:
+        包含表字段信息的字典
+    """
+    try:
+        if '.' not in table_name:
+            _logger.error(f"表名格式错误，应为 schema.table: {table_name}")
             return {}
-    
-    def find_tables_by_field(self, field_name: str, database_id: str) -> List[Dict[str, Any]]:
-        """
-        通过字段名查找包含该字段的表
         
-        Args:
-            field_name: 字段名
-            database_id: 数据库ID
-            
-        Returns:
-            包含该字段的表列表
+        schema_name, table_name_only = table_name.split('.', 1)
+        
+        fields_cypher = f"""
+        MATCH (d:Database {{name: '{database_id}'}})-[:HAS_SCHEMA]->(s:Schema {{name: '{schema_name}'}})-[:HAS_TABLE]->(t:Table {{name: '{table_name_only}'}})
+        OPTIONAL MATCH (t)-[:USES_FIELD_GROUP]->(sfg:SharedFieldGroup)-[:HAS_FIELD]->(sf:Field)
+        OPTIONAL MATCH (t)-[:HAS_UNIQUE_FIELD]->(uf:Field)
+        WITH t, 
+             COLLECT(DISTINCT {{
+                 name: sf.name, 
+                 type: sf.type,
+                 description: sf.description
+             }}) AS shared_fields,
+             COLLECT(DISTINCT {{
+                 name: uf.name, 
+                 type: uf.type,
+                 description: uf.description
+             }}) AS unique_fields
+        RETURN shared_fields, unique_fields
         """
-        try:
-            # 先尝试从图数据库查询（可能会失败如果关系不存在）
-            matching_tables = []
-            try:
-                cypher_query = f"""
-                MATCH (f:Field {{name: '{field_name}'}})-[:BELONGS_TO]->(t:Table)
-                RETURN t.name as table_name, t.schema as schema_name, f.type as field_type
-                """
-                
-                success, graph_results = self.cypher_executor.execute_transactional_cypher(cypher_query)
-                
-                if success and graph_results:
-                    return [
-                        {
-                            'table': result['table_name'],
-                            'schema': result['schema_name'],
-                            'field_type': result['field_type']
-                        }
-                        for result in graph_results
-                    ]
-            except Exception as graph_e:
-                self.logger.debug(f"图数据库查询失败，回退到Snowflake查询: {graph_e}")
+        
+        success, graph_results = _get_cypher_executor().execute_transactional_cypher(fields_cypher)
+        
+        if not success or not graph_results:
+            _logger.warning(f"从图数据库获取表 {table_name} 字段信息失败")
+            return {}
+        
+        table_info = {
+            'schema': schema_name,
+            'table': table_name_only,
+            'full_name': table_name,
+            'fields': []
+        }
+        
+        result = graph_results[0]
+        all_fields = []
+        
+        # 处理共享字段
+        if result.get('shared_fields'):
+            for field in result['shared_fields']:
+                if field['name']:
+                    all_fields.append({
+                        'name': field['name'],
+                        'type': field.get('type', ''),
+                        'description': field.get('description', ''),
+                        'source': 'shared'
+                    })
+        
+        # 处理独有字段
+        if result.get('unique_fields'):
+            for field in result['unique_fields']:
+                if field['name']:
+                    all_fields.append({
+                        'name': field['name'],
+                        'type': field.get('type', ''),
+                        'description': field.get('description', ''),
+                        'source': 'unique'
+                    })
+        
+        all_fields.sort(key=lambda x: x['name'])
+        table_info['fields'] = all_fields
+        
+        return table_info
+        
+    except Exception as e:
+        _logger.error(f"获取表 {table_name} 字段信息失败: {e}")
+        return {}
+
+
+def filter_useful_tables(user_query: str, all_tables: Dict[str, Any]) -> List[str]:
+    """
+    使用LLM判断有用的表 - 函数式版本
+    
+    Args:
+        user_query: 用户查询
+        all_tables: 所有表信息
+        
+    Returns:
+        有用的表名列表
+    """
+    try:
+        llm = _get_llm()
+        if not llm or not all_tables:
+            return list(all_tables.keys())
+        
+        # 格式化表信息
+        table_info_text = ""
+        for table_name, table_data in all_tables.items():
+            table_info_text += f"- {table_name} (类型: {table_data.get('type', 'TABLE')}, 行数: {table_data.get('row_count', 'unknown')})\n"
+        
+        # 调用LLM
+        prompt = TABLE_USEFULNESS_PROMPT.format(
+            user_query=user_query,
+            all_tables=table_info_text
+        )
+        
+        response = llm.invoke(prompt)
+        response_text = response.content if hasattr(response, 'content') else str(response)
+        
+        # 记录实际LLM响应以便调试
+        _logger.info(f"LLM原始响应: {response_text[:500]}...")
+        
+        # 尝试解析JSON响应
+        useful_tables = _extract_useful_tables_from_response(response_text, list(all_tables.keys()))
+        _logger.info(f"LLM判断有用的表: {useful_tables}")
+        return useful_tables
             
-            # 如果图数据库没有结果，从Snowflake直接查询
-            schemas_result = snowflake_sql_query(GET_ALL_SCHEMAS, database_id)
-            matching_tables = []
+    except Exception as e:
+        _logger.error(f"过滤有用表失败: {e}")
+        return list(all_tables.keys())
+
+
+def filter_useful_fields(user_query: str, table_name: str, table_info: Dict[str, Any]) -> List[str]:
+    """
+    使用LLM判断有用的字段 - 函数式版本
+    
+    Args:
+        user_query: 用户查询
+        table_name: 表名
+        table_info: 表信息
+        
+    Returns:
+        有用的字段名列表
+    """
+    try:
+        llm = _get_llm()
+        if not llm or not table_info.get('fields'):
+            return [field['name'] for field in table_info.get('fields', [])]
+        
+        # 格式化字段信息
+        fields_info_text = ""
+        for field in table_info['fields']:
+            fields_info_text += f"- {field['name']} ({field.get('type', 'unknown')}) - {field.get('description', '无描述')}\n"
+        
+        # 调用LLM
+        prompt = FIELD_USEFULNESS_PROMPT.format(
+            user_query=user_query,
+            table_name=table_name,
+            all_fields=fields_info_text
+        )
+        
+        response = llm.invoke(prompt)
+        response_text = response.content if hasattr(response, 'content') else str(response)
+        
+        # 记录实际LLM响应以便调试
+        _logger.info(f"LLM原始响应: {response_text[:500]}...")
+        
+        # 尝试解析JSON响应
+        all_field_names = [field['name'] for field in table_info.get('fields', [])]
+        useful_fields = _extract_useful_fields_from_response(response_text, all_field_names)
+        _logger.info(f"表 {table_name} 中LLM判断有用的字段: {useful_fields}")
+        return useful_fields
             
-            for schema_row in schemas_result:
-                schema_name = schema_row['SCHEMA_NAME']
-                
-                # 查询该schema下的所有表
-                tables_sql = GET_TABLES_BASIC.format(schema_name=schema_name)
-                tables_result = snowflake_sql_query(tables_sql, database_id)
-                
-                for table_row in tables_result:
-                    table_name = table_row['TABLE_NAME']
+    except Exception as e:
+        _logger.error(f"过滤有用字段失败: {e}")
+        return [field['name'] for field in table_info.get('fields', [])]
+
+
+# ===== 主要的组合函数 =====
+
+def prepare_schema_info(user_query: str, database_id: str) -> Dict[str, Any]:
+    """
+    为SqlAgent准备schema信息 - 函数式版本
+    这是InfoAgent的主要入口函数
+    
+    Args:
+        user_query: 用户查询
+        database_id: 数据库ID
+        
+    Returns:
+        准备好的schema信息
+    """
+    try:
+        _logger.info(f"开始为查询准备schema信息: {user_query}")
+        
+        # 1. 获取所有表
+        all_tables = get_all_tables(database_id)
+        if not all_tables:
+            return {"error": "无法获取表信息"}
+        
+        _logger.info(f"获取到 {len(all_tables)} 个表")
+        
+        # 2. 使用LLM过滤有用的表（限制处理数量避免超时）
+        if len(all_tables) > 20:
+            _logger.warning(f"表数量过多 ({len(all_tables)})，跳过LLM过滤，使用前20个表")
+            useful_table_names = list(all_tables.keys())[:20]
+        else:
+            useful_table_names = filter_useful_tables(user_query, all_tables)
+        
+        # 确保至少有一些表可用
+        if not useful_table_names:
+            _logger.warning("LLM未返回有用表，使用前5个表作为fallback")
+            useful_table_names = list(all_tables.keys())[:5]
+        
+        # 3. 为每个有用的表获取字段信息并过滤有用字段
+        schema_summary = {
+            "useful_tables": {},
+            "total_tables_count": len(all_tables),
+            "filtered_tables_count": len(useful_table_names)
+        }
+        
+        # 限制处理的表数量，避免过度处理
+        max_tables_to_process = 10
+        tables_to_process = useful_table_names[:max_tables_to_process]
+        
+        for i, table_name in enumerate(tables_to_process, 1):
+            _logger.info(f"处理表 {i}/{len(tables_to_process)}: {table_name}")
+            
+            if table_name in all_tables:
+                table_info = get_table_fields(table_name, database_id)
+                if table_info:
+                    # 如果字段太多，跳过LLM过滤以节省时间
+                    if len(table_info.get("fields", [])) > 50:
+                        _logger.warning(f"表 {table_name} 字段过多，跳过LLM过滤")
+                        useful_fields = [field['name'] for field in table_info.get("fields", [])][:20]
+                    else:
+                        useful_fields = filter_useful_fields(user_query, table_name, table_info)
                     
-                    # 检查该表是否包含指定字段
-                    try:
-                        columns_sql = GET_COLUMNS_BASIC.format(
-                            schema_name=schema_name,
-                            table_name=table_name
-                        )
-                        columns_result = snowflake_sql_query(columns_sql, database_id)
-                        
-                        for col_row in columns_result:
-                            if col_row['COLUMN_NAME'].upper() == field_name.upper():
-                                matching_tables.append({
-                                    'table': table_name,
-                                    'schema': schema_name,
-                                    'field_type': col_row['DATA_TYPE']
-                                })
-                                break
-                    except:
-                        continue
-            
-            return matching_tables
-            
-        except Exception as e:
-            self.logger.error(f"通过字段 {field_name} 查找表失败: {e}")
-            return []
-    
-    def suggest_similar_fields(self, field_name: str, database_id: str, threshold: float = 0.6) -> List[Dict[str, Any]]:
-        """
-        根据字段名推荐相似的字段
-        
-        Args:
-            field_name: 目标字段名
-            database_id: 数据库ID
-            threshold: 相似度阈值
-            
-        Returns:
-            相似字段列表
-        """
-        try:
-            similar_fields = []
-            target_field_lower = field_name.lower()
-            
-            # 尝试从图数据库获取所有字段
-            try:
-                cypher_query = """
-                MATCH (f:Field)-[:BELONGS_TO]->(t:Table)
-                RETURN f.name as field_name, t.name as table_name, t.schema as schema_name, f.type as field_type
-                """
-                
-                success, graph_results = self.cypher_executor.execute_transactional_cypher(cypher_query)
-                
-                if success and graph_results:
-                    for result in graph_results:
-                        candidate_field = result['field_name'].lower()
-                        similarity = SequenceMatcher(None, target_field_lower, candidate_field).ratio()
-                        
-                        if similarity >= threshold:
-                            similar_fields.append({
-                                'field_name': result['field_name'],
-                                'table': result['table_name'],
-                                'schema': result['schema_name'],
-                                'field_type': result['field_type'],
-                                'similarity': similarity
-                            })
-            except Exception as graph_e:
-                self.logger.debug(f"图数据库查询失败，无法获取相似字段: {graph_e}")
-                # 当图数据库查询失败时，返回空列表（可以在这里添加从Snowflake查询的逻辑）
-            
-            # 按相似度排序
-            similar_fields.sort(key=lambda x: x['similarity'], reverse=True)
-            
-            return similar_fields[:10]  # 返回前10个最相似的
-            
-        except Exception as e:
-            self.logger.error(f"查找相似字段失败: {e}")
-            return []
-    
-    def summarize_related_schema(self, keywords: List[str], database_id: str) -> str:
-        """
-        根据关键词生成相关schema的摘要描述
-        
-        Args:
-            keywords: 关键词列表
-            database_id: 数据库ID
-            
-        Returns:
-            Schema摘要文本
-        """
-        try:
-            related_info = {}
-            
-            # 构建所有关键词的查询语句
-            table_queries = []
-            field_queries = []
-            for keyword in keywords:
-                # 查找表名包含关键词的表
-                table_queries.append(f"""
-                MATCH (t:Table)
-                WHERE toLower(t.name) CONTAINS toLower('{keyword}') 
-                   OR toLower(t.schema) CONTAINS toLower('{keyword}')
-                RETURN t.name as table_name, t.schema as schema_name
-                """)
-                
-                # 查找字段名包含关键词的字段
-                field_queries.append(f"""
-                MATCH (f:Field)-[:BELONGS_TO]->(t:Table)
-                WHERE toLower(f.name) CONTAINS toLower('{keyword}')
-                RETURN f.name as field_name, t.name as table_name, t.schema as schema_name
-                """)
-            
-            # 合并所有查询语句并执行
-            all_queries = ";\n".join(table_queries + field_queries)
-            success, all_results = self.cypher_executor.execute_transactional_cypher(all_queries)
-            
-            if success and all_results:
-                # 处理表查询结果
-                for result in all_results[:len(keywords)]:  # 前半部分是表查询结果
-                    table_key = f"{result['schema_name']}.{result['table_name']}"
-                    if table_key not in related_info:
-                        # 获取表的详细字段信息
-                        table_details = self.get_table_fields(table_key, database_id)
-                        related_info[table_key] = table_details
-                
-                # 处理字段查询结果
-                for result in all_results[len(keywords):]:  # 后半部分是字段查询结果
-                    table_key = f"{result['schema_name']}.{result['table_name']}"
-                    if table_key not in related_info:
-                        table_details = self.get_table_fields(table_key, database_id)
-                        related_info[table_key] = table_details
-            
-            # 使用LLM生成摘要
-            if related_info and self.llm:
-                raw_data = json.dumps(related_info, indent=2, ensure_ascii=False)
-                prompt = SCHEMA_SUMMARY_PROMPT.format(raw_data=raw_data)
-                
-                response = self.llm.invoke(prompt)
-                return response.content if hasattr(response, 'content') else str(response)
-            
-            # 如果没有LLM，生成简单摘要
-            summary_parts = []
-            for table_key, table_info in related_info.items():
-                if isinstance(table_info, dict) and 'fields' in table_info:
-                    field_count = len(table_info['fields'])
-                    key_fields = [f['name'] for f in table_info['fields'][:3]]
-                    summary_parts.append(
-                        f"表 {table_key}: {field_count}个字段，主要字段: {', '.join(key_fields)}"
-                    )
-            
-            return "; ".join(summary_parts) if summary_parts else "未找到相关Schema信息"
-            
-        except Exception as e:
-            self.logger.error(f"生成Schema摘要失败: {e}")
-            return f"Schema摘要生成失败: {e}"
-    
-    def analyze_sql_error(self, sql_query: str, error_message: str, database_id: str) -> Dict[str, Any]:
-        """
-        分析SQL错误并提供修复建议
-        
-        Args:
-            sql_query: 出错的SQL语句
-            error_message: 错误信息
-            database_id: 数据库ID
-            
-        Returns:
-            错误分析结果
-        """
-        try:
-            # 使用LLM分析错误
-            if self.llm:
-                prompt = ERROR_ANALYSIS_PROMPT.format(
-                    sql_query=sql_query,
-                    error_message=error_message,
-                    database_id=database_id
-                )
-                
-                response = self.llm.invoke(prompt)
-                try:
-                    # 尝试解析JSON响应
-                    analysis_result = json.loads(response.content if hasattr(response, 'content') else str(response))
-                except json.JSONDecodeError:
-                    # 如果不是JSON，创建默认结构
-                    analysis_result = {
-                        "error_type": "unknown",
-                        "cause": response.content if hasattr(response, 'content') else str(response),
-                        "missing_info": [],
-                        "suggestions": []
+                    schema_summary["useful_tables"][table_name] = {
+                        "database": database_id,  # 添加数据库信息
+                        "schema": table_info["schema"],
+                        "table": table_info["table"],
+                        "full_table_name": f"{database_id}.{table_name}",  # 完整表名
+                        "useful_fields": useful_fields,
+                        "total_fields_count": len(table_info.get("fields", [])),
+                        "filtered_fields_count": len(useful_fields)
                     }
-            else:
-                # 基础错误分析
-                analysis_result = self._basic_error_analysis(sql_query, error_message)
-            
-            # 补充相似名称建议
-            if "not found" in error_message.lower() or "does not exist" in error_message.lower():
-                # 提取错误中的表名或字段名
-                missing_names = self._extract_missing_names(error_message)
-                
-                for missing_name in missing_names:
-                    # 查找相似的表名或字段名
-                    similar_suggestions = self.suggest_similar_fields(missing_name, database_id)
-                    if similar_suggestions:
-                        analysis_result["suggestions"].extend([
-                            f"是否是 {sugg['field_name']} (表: {sugg['schema']}.{sugg['table']})?"
-                            for sugg in similar_suggestions[:3]
-                        ])
-            
-            return analysis_result
-            
-        except Exception as e:
-            self.logger.error(f"分析SQL错误失败: {e}")
-            return {
-                "error_type": "analysis_failed",
-                "cause": str(e),
-                "missing_info": [],
-                "suggestions": ["请检查SQL语法和表名/字段名是否正确"]
-            }
+        
+        _logger.info(f"Schema信息准备完成，处理了 {len(tables_to_process)} 个表")
+        return schema_summary
+        
+    except Exception as e:
+        _logger.error(f"准备schema信息失败: {e}")
+        return {"error": f"准备schema信息失败: {e}"}
+
+
+# ===== 辅助函数 =====
+
+def _extract_useful_tables_from_response(response_text: str, all_table_names: List[str]) -> List[str]:
+    """
+    从LLM响应中提取有用的表名列表 - 健壮版本
     
-    def process_info_request(self, state: SystemState, request: InfoRequest) -> InfoResponse:
-        """
-        处理来自SQLAgent的信息请求
+    Args:
+        response_text: LLM的原始响应文本
+        all_table_names: 所有可用的表名列表
         
-        Args:
-            state: 系统状态
-            request: 信息请求
-            
-        Returns:
-            信息响应
-        """
-        try:
-            response_content = ""
-            tables_info = {}
-            relationships = []
-            suggestions = []
-            
-            if request['message_type'] == InteractionType.INITIAL_SCHEMA:
-                # 初始schema查询
-                keywords = self._extract_keywords_from_query(state['user_query'])
-                response_content = self.summarize_related_schema(keywords, state['database_id'])
-                
-            elif request['message_type'] == InteractionType.TABLE_FIELDS:
-                # 特定表字段查询
-                if request['specific_tables']:
-                    for table_name in request['specific_tables']:
-                        table_info = self.get_table_fields(table_name, state['database_id'])
-                        if table_info:
-                            tables_info[table_name] = table_info
-                    response_content = f"已获取 {len(tables_info)} 个表的字段信息"
-                
-            elif request['message_type'] == InteractionType.ERROR_FEEDBACK:
-                # 错误反馈处理
-                if request['error_info']:
-                    error_analysis = self.analyze_sql_error(
-                        state.get('current_sql', ''),
-                        request['error_info'],
-                        state['database_id']
-                    )
-                    response_content = error_analysis['cause']
-                    suggestions = error_analysis['suggestions']
-                
-            elif request['message_type'] == InteractionType.FIELD_MEANING:
-                # 字段含义查询
-                if request['specific_fields']:
-                    for field_name in request['specific_fields']:
-                        field_tables = self.find_tables_by_field(field_name, state['database_id'])
-                        if field_tables:
-                            tables_info[field_name] = field_tables
-                    response_content = f"字段 {', '.join(request['specific_fields'])} 的相关信息"
-            
-            return {
-                "message_type": request['message_type'],
-                "content": response_content,
-                "metadata": {},
-                "timestamp": None,
-                "tables_info": tables_info,
-                "relationships": relationships,
-                "suggestions": suggestions
-            }
-            
-        except Exception as e:
-            self.logger.error(f"处理信息请求失败: {e}")
-            return {
-                "message_type": request['message_type'],
-                "content": f"处理请求失败: {e}",
-                "metadata": {},
-                "timestamp": None,
-                "tables_info": {},
-                "relationships": [],
-                "suggestions": []
-            }
+    Returns:
+        有用的表名列表
+    """
+    try:
+        # 首先尝试直接解析JSON
+        result = json.loads(response_text)
+        useful_tables = result.get('useful_tables', [])
+        if useful_tables and isinstance(useful_tables, list):
+            # 验证返回的表名是否在可用表名中
+            valid_tables = [table for table in useful_tables if table in all_table_names]
+            if valid_tables:
+                return valid_tables
     
+    except json.JSONDecodeError:
+        pass
     
-    def _extract_keywords_from_query(self, query: str) -> List[str]:
-        """从用户查询中提取关键词"""
-        # 移除常见的停用词
-        stop_words = {
-            'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 
-            'of', 'with', 'by', 'what', 'how', 'when', 'where', 'why', 'which',
-            'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had',
-            'do', 'does', 'did', 'can', 'could', 'should', 'would', 'will'
-        }
-        
-        # 简单的关键词提取
-        words = re.findall(r'\b\w+\b', query.lower())
-        keywords = [word for word in words if word not in stop_words and len(word) > 2]
-        
-        return keywords[:10]  # 返回前10个关键词
+    # 如果JSON解析失败，尝试从响应中提取JSON块
+    import re
     
-    def _basic_error_analysis(self, sql_query: str, error_message: str) -> Dict[str, Any]:
-        """基础错误分析（不使用LLM）"""
-        error_type = "unknown"
-        cause = error_message
-        suggestions = []
-        
-        error_lower = error_message.lower()
-        
-        if "table" in error_lower and ("not found" in error_lower or "does not exist" in error_lower):
-            error_type = "table_not_found"
-            suggestions.append("检查表名是否正确，可能需要包含schema名称")
-            
-        elif "column" in error_lower and ("not found" in error_lower or "does not exist" in error_lower):
-            error_type = "column_not_found"
-            suggestions.append("检查字段名是否正确，注意大小写")
-            
-        elif "syntax" in error_lower:
-            error_type = "syntax_error"
-            suggestions.append("检查SQL语法是否正确")
-            
-        return {
-            "error_type": error_type,
-            "cause": cause,
-            "missing_info": [],
-            "suggestions": suggestions
-        }
+    # 查找代码块中的JSON
+    json_patterns = [
+        r'```json\s*(.*?)\s*```',
+        r'```\s*(.*?)\s*```',
+        r'\{[^{}]*"useful_tables"[^{}]*\}',
+    ]
     
-    def _extract_missing_names(self, error_message: str) -> List[str]:
-        """从错误信息中提取缺失的表名或字段名"""
-        # 简单的正则表达式匹配
-        patterns = [
-            r"table '(\w+)'",
-            r"column '(\w+)'",
-            r"'(\w+)' not found",
-            r"(\w+) does not exist"
-        ]
+    for pattern in json_patterns:
+        matches = re.findall(pattern, response_text, re.DOTALL | re.IGNORECASE)
+        for match in matches:
+            try:
+                result = json.loads(match.strip())
+                useful_tables = result.get('useful_tables', [])
+                if useful_tables and isinstance(useful_tables, list):
+                    valid_tables = [table for table in useful_tables if table in all_table_names]
+                    if valid_tables:
+                        _logger.info(f"从代码块中成功提取表名: {valid_tables}")
+                        return valid_tables
+            except json.JSONDecodeError:
+                continue
+    
+    # 如果还是失败，尝试直接从文本中找表名
+    found_tables = []
+    for table_name in all_table_names:
+        if table_name.lower() in response_text.lower():
+            found_tables.append(table_name)
+    
+    if found_tables:
+        _logger.warning(f"JSON解析失败，从文本中匹配到表名: {found_tables[:5]}...")  # 限制数量
+        return found_tables[:5]  # 限制返回数量，避免过多
+    
+    # 最后的fallback：返回前几个表
+    _logger.warning("LLM响应解析完全失败，返回前3个表作为fallback")
+    return all_table_names[:3]
+
+
+def _extract_useful_fields_from_response(response_text: str, all_field_names: List[str]) -> List[str]:
+    """
+    从LLM响应中提取有用的字段名列表 - 健壮版本
+    
+    Args:
+        response_text: LLM的原始响应文本
+        all_field_names: 所有可用的字段名列表
         
-        missing_names = []
-        for pattern in patterns:
-            matches = re.findall(pattern, error_message, re.IGNORECASE)
-            missing_names.extend(matches)
-        
-        return list(set(missing_names))  # 去重
+    Returns:
+        有用的字段名列表
+    """
+    try:
+        # 首先尝试直接解析JSON
+        result = json.loads(response_text)
+        useful_fields = result.get('useful_fields', [])
+        if useful_fields and isinstance(useful_fields, list):
+            # 验证返回的字段名是否在可用字段名中
+            valid_fields = [field for field in useful_fields if field in all_field_names]
+            if valid_fields:
+                return valid_fields
+    
+    except json.JSONDecodeError:
+        pass
+    
+    # 如果JSON解析失败，尝试从响应中提取JSON块
+    import re
+    
+    # 查找代码块中的JSON
+    json_patterns = [
+        r'```json\s*(.*?)\s*```',
+        r'```\s*(.*?)\s*```',
+        r'\{[^{}]*"useful_fields"[^{}]*\}',
+    ]
+    
+    for pattern in json_patterns:
+        matches = re.findall(pattern, response_text, re.DOTALL | re.IGNORECASE)
+        for match in matches:
+            try:
+                result = json.loads(match.strip())
+                useful_fields = result.get('useful_fields', [])
+                if useful_fields and isinstance(useful_fields, list):
+                    valid_fields = [field for field in useful_fields if field in all_field_names]
+                    if valid_fields:
+                        _logger.info(f"从代码块中成功提取字段名: {valid_fields}")
+                        return valid_fields
+            except json.JSONDecodeError:
+                continue
+    
+    # 如果还是失败，尝试直接从文本中找字段名
+    found_fields = []
+    for field_name in all_field_names:
+        if field_name.lower() in response_text.lower():
+            found_fields.append(field_name)
+    
+    if found_fields:
+        _logger.warning(f"JSON解析失败，从文本中匹配到字段名: {found_fields[:10]}...")  # 限制数量
+        return found_fields[:10]  # 限制返回数量，避免过多
+    
+    # 最后的fallback：返回所有字段
+    _logger.warning("LLM响应解析完全失败，返回所有字段作为fallback")
+    return all_field_names
