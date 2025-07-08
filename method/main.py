@@ -28,7 +28,7 @@ from Communicate import SimpleState
 logger = logging.getLogger(__name__)
 MAX_ITERATIONS = 3
 
-# ===== InfoAgent 函数式实现 =====
+# ===== InfoAgent 实现 =====
 
 def info_agent_node(state: SimpleState) -> Dict[str, Any]:
     """InfoAgent节点 - 纯函数式实现"""
@@ -131,24 +131,6 @@ def sql_agent_node(state: SimpleState) -> Union[Dict[str, Any], Send]:
         }
 
 # ===== 辅助节点函数 =====
-
-def initialize_node(state: SimpleState) -> Send:
-    """初始化节点"""
-    logger.info(f"开始处理查询: {state['user_query']}")
-    
-    # 发送到InfoAgent开始处理
-    return Send("info_agent_node", {
-        **state,
-        "step": "initialized",
-        "iteration": 0,
-        "schema_info": {},
-        "generated_sql": "",
-        "execution_result": {},
-        "final_sql": "",
-        "final_result": [],
-        "error_message": "",
-        "is_completed": False
-    })
 
 def result_handler_node(state: SimpleState) -> Dict[str, Any]:
     """结果处理节点"""
@@ -327,7 +309,7 @@ def print_results_summary(result: Dict[str, Any]) -> None:
     
     print("="*80)
 
-def run_sql_generation_system(
+def run(
     query: str,
     database_id: str,
     additional_info: str = "",
@@ -352,13 +334,12 @@ def run_sql_generation_system(
         workflow = StateGraph(SimpleState)
         
         # 添加节点
-        workflow.add_node("initialize", initialize_node)
         workflow.add_node("info_agent_node", info_agent_node)  
         workflow.add_node("sql_agent_node", sql_agent_node)
         workflow.add_node("result_handler_node", result_handler_node)
         
-        # 设置流程
-        workflow.add_edge(START, "initialize")
+        # 将入口点设置为 info_agent_node
+        workflow.set_entry_point("info_agent_node")
         
         # 添加条件边
         workflow.add_conditional_edges(
@@ -371,9 +352,15 @@ def run_sql_generation_system(
         )
         
         # 编译图
-        memory = MemorySaver()
-        graph = workflow.compile(checkpointer=memory)
+        graph = workflow.compile()
         
+        # 保存工作流程图
+        try:
+            workflow_graph = graph.get_graph()
+            workflow_graph.draw_mermaid_png().save("workflow.png")
+            logger.info("工作流程图已保存至: workflow.png")
+        except Exception as e:
+            logger.warning(f"保存工作流程图失败: {e}")
         # 初始状态
         initial_state: SimpleState = {
             "user_query": query,
@@ -494,7 +481,7 @@ def main():
             print(f"额外信息: {args.additional_info}")
         print("\n开始执行...")
         
-        result = run_sql_generation_system(
+        result = run(
             query=args.query,
             database_id=args.database,
             additional_info=args.additional_info,

@@ -17,7 +17,7 @@ sys.path.insert(0, str(project_root))
 
 from utils.SnowConnect import snowflake_sql_query
 from utils.init_llm import initialize_llm
-from prompts import SQL_AGENT_PROMPT
+from prompts import SQL_AGENT_PROMPT, sql_parser
 
 # 全局资源 - 延迟初始化
 _llm = None
@@ -52,33 +52,42 @@ def generate_sql(user_query: str, schema_info: Dict[str, Any], database_id: str)
             _logger.warning("LLM未初始化，无法生成SQL")
             return "-- LLM未初始化，无法生成SQL"
         
-        # 使用LLM生成SQL
-        prompt = SQL_AGENT_PROMPT.format(
-            user_query=user_query,
-            database_id=database_id,
-            schema_info=json.dumps(schema_info, indent=2, ensure_ascii=False),
-            execution_history="无执行历史"
-        )
+        # 创建chain
+        chain = SQL_AGENT_PROMPT | llm | sql_parser
         
-        response = llm.invoke(prompt)
-        response_text = response.content if hasattr(response, 'content') else str(response)
+        # 调用chain
+        response = chain.invoke({
+            "user_query": user_query,
+            "database_id": database_id,
+            "schema_info": json.dumps(schema_info, indent=2, ensure_ascii=False),
+            "execution_history": "无执行历史"
+        })
         
         # 记录原始响应以便调试
-        _logger.info(f"LLM原始响应: {response_text[:200]}...")
+        _logger.info(f"LLM 响应 (类型: {type(response)}): {str(response)[:200]}...")
         
-        # 尝试解析JSON响应
-        try:
-            sql_response = json.loads(response_text)
-            sql_query = sql_response.get('sql_query', '')
-            _logger.info(f"JSON解析成功，生成SQL: {sql_query}")
-            return sql_query
-            
-        except json.JSONDecodeError:
-            # 如果不是JSON格式，尝试提取SQL
-            _logger.warning("JSON解析失败，尝试从响应中提取SQL")
-            extracted_sql = extract_sql_from_response(response_text)
-            _logger.info(f"从响应中提取SQL: {extracted_sql[:100]}...")
-            return extracted_sql
+        # 检查响应类型并提取SQL
+        if isinstance(response, dict):
+            # 如果是字典，直接提取
+            sql_query = response.get('sql_query', '')
+            _logger.info(f"从字典响应中提取SQL: {sql_query}")
+        elif hasattr(response, 'sql_query'):
+            # 如果是Pydantic模型，直接访问属性
+            sql_query = response.sql_query
+            _logger.info(f"从Pydantic模型响应中提取SQL: {sql_query}")
+        else:
+            # 否则，作为字符串处理
+            response_text = str(response)
+            try:
+                # 尝试解析JSON
+                data = json.loads(response_text)
+                sql_query = data.get('sql_query', '')
+            except json.JSONDecodeError:
+                # 最终回退到从Markdown代码块提取
+                _logger.warning("JSON解析失败，尝试从响应中提取SQL")
+                sql_query = extract_sql_from_response(response_text)
+                
+        return sql_query
             
     except Exception as e:
         _logger.error(f"生成SQL失败: {e}")
@@ -103,13 +112,13 @@ def execute_sql(sql_query: str, database_id: str) -> Dict[str, Any]:
         cleaned_sql = clean_sql(sql_query)
         
         # 放宽SQL验证 - 即使是注释也尝试执行
-        if not cleaned_sql:
-            _logger.warning("SQL语句为空，跳过执行")
+        if not cleaned_sql or cleaned_sql.strip().startswith('--'):
+            _logger.warning("SQL语句为空或为注释，跳过执行")
             return {
                 "success": False,
                 "sql_query": sql_query,
                 "result_data": [],
-                "error_message": "SQL语句为空",
+                "error_message": "SQL语句为空或为注释",
                 "execution_time": time.time() - start_time
             }
         

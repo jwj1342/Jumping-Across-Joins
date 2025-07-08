@@ -15,7 +15,8 @@ sys.path.insert(0, str(project_root))
 
 from utils.CypherExecutor import CypherExecutor
 from utils.init_llm import initialize_llm
-from prompts import TABLE_USEFULNESS_PROMPT, FIELD_USEFULNESS_PROMPT
+from method.prompts import TABLE_USEFULNESS_PROMPT, FIELD_USEFULNESS_PROMPT
+from method.Communicate import UsefulTablesResponse, UsefulFieldsResponse
 
 # 全局资源 - 延迟初始化
 _cypher_executor = None
@@ -171,7 +172,7 @@ def get_table_fields(table_name: str, database_id: str) -> Dict[str, Any]:
 
 def filter_useful_tables(user_query: str, all_tables: Dict[str, Any]) -> List[str]:
     """
-    使用LLM判断有用的表 - 函数式版本
+    使用LLM判断有用的表 - 函数式版本，使用JsonOutputParser
     
     Args:
         user_query: 用户查询
@@ -188,33 +189,38 @@ def filter_useful_tables(user_query: str, all_tables: Dict[str, Any]) -> List[st
         # 格式化表信息
         table_info_text = ""
         for table_name, table_data in all_tables.items():
-            table_info_text += f"- {table_name} (类型: {table_data.get('type', 'TABLE')}, 行数: {table_data.get('row_count', 'unknown')})\n"
+            table_info_text += f"- {table_name} (Type: {table_data.get('type', 'TABLE')}, Rows: {table_data.get('row_count', 'unknown')})\n"
         
-        # 调用LLM
-        prompt = TABLE_USEFULNESS_PROMPT.format(
-            user_query=user_query,
-            all_tables=table_info_text
-        )
+        # 从prompts模块获取parser
+        from method.prompts import tables_parser
+        # 创建chain使用PromptTemplate和JsonOutputParser
+        chain = TABLE_USEFULNESS_PROMPT | llm | tables_parser
         
-        response = llm.invoke(prompt)
-        response_text = response.content if hasattr(response, 'content') else str(response)
+        # 调用chain
+        response = chain.invoke({
+            "user_query": user_query,
+            "all_tables": table_info_text
+        })
         
-        # 记录实际LLM响应以便调试
-        _logger.info(f"LLM原始响应: {response_text[:500]}...")
-        
-        # 尝试解析JSON响应
-        useful_tables = _extract_useful_tables_from_response(response_text, list(all_tables.keys()))
-        _logger.info(f"LLM判断有用的表: {useful_tables}")
-        return useful_tables
+        # 检查响应类型
+        if isinstance(response, dict):
+            # 如果LLM直接返回字典，则直接使用
+            useful_tables_data = UsefulTablesResponse.model_validate(response)
+        else:
+            # 否则，假定它是一个需要解析的字符串
+            useful_tables_data = tables_parser.parse(response)
             
+        return useful_tables_data.useful_tables
+
     except Exception as e:
         _logger.error(f"过滤有用表失败: {e}")
+        # 出错时返回所有表作为备用
         return list(all_tables.keys())
 
 
 def filter_useful_fields(user_query: str, table_name: str, table_info: Dict[str, Any]) -> List[str]:
     """
-    使用LLM判断有用的字段 - 函数式版本
+    使用LLM判断有用的字段 - 函数式版本，使用JsonOutputParser
     
     Args:
         user_query: 用户查询
@@ -232,33 +238,39 @@ def filter_useful_fields(user_query: str, table_name: str, table_info: Dict[str,
         # 格式化字段信息
         fields_info_text = ""
         for field in table_info['fields']:
-            fields_info_text += f"- {field['name']} ({field.get('type', 'unknown')}) - {field.get('description', '无描述')}\n"
+            fields_info_text += f"- {field['name']} ({field.get('type', 'unknown')}) - {field.get('description', 'No description')}\n"
         
-        # 调用LLM
-        prompt = FIELD_USEFULNESS_PROMPT.format(
-            user_query=user_query,
-            table_name=table_name,
-            all_fields=fields_info_text
-        )
+        # 从prompts模块获取parser
+        from method.prompts import fields_parser
+        # 创建chain使用PromptTemplate和JsonOutputParser
+        chain = FIELD_USEFULNESS_PROMPT | llm | fields_parser
         
-        response = llm.invoke(prompt)
-        response_text = response.content if hasattr(response, 'content') else str(response)
+        # 调用chain
+        response = chain.invoke({
+            "user_query": user_query,
+            "table_name": table_name,
+            "all_fields": fields_info_text
+        })
         
-        # 记录实际LLM响应以便调试
-        _logger.info(f"LLM原始响应: {response_text[:500]}...")
-        
-        # 尝试解析JSON响应
-        all_field_names = [field['name'] for field in table_info.get('fields', [])]
-        useful_fields = _extract_useful_fields_from_response(response_text, all_field_names)
-        _logger.info(f"表 {table_name} 中LLM判断有用的字段: {useful_fields}")
-        return useful_fields
+        # 检查响应类型
+        if isinstance(response, dict):
+            # LLM直接返回字典
+            _logger.debug("LLM返回了字典，直接验证")
+            useful_fields_data = UsefulFieldsResponse.model_validate(response)
+        else:
+            # LLM返回字符串，需要解析
+            _logger.debug("LLM返回了字符串，进行解析")
+            useful_fields_data = fields_parser.parse(response)
             
+        return useful_fields_data.useful_fields
+
     except Exception as e:
-        _logger.error(f"过滤有用字段失败: {e}")
+        _logger.warning(f"过滤表 {table_name} 的有用字段失败: {e}")
+        # 出错时返回所有字段作为备用
         return [field['name'] for field in table_info.get('fields', [])]
 
 
-# ===== 主要的组合函数 =====
+# ===== 主要的函数 =====
 
 def prepare_schema_info(user_query: str, database_id: str) -> Dict[str, Any]:
     """
@@ -334,131 +346,3 @@ def prepare_schema_info(user_query: str, database_id: str) -> Dict[str, Any]:
     except Exception as e:
         _logger.error(f"准备schema信息失败: {e}")
         return {"error": f"准备schema信息失败: {e}"}
-
-
-# ===== 辅助函数 =====
-
-def _extract_useful_tables_from_response(response_text: str, all_table_names: List[str]) -> List[str]:
-    """
-    从LLM响应中提取有用的表名列表 - 健壮版本
-    
-    Args:
-        response_text: LLM的原始响应文本
-        all_table_names: 所有可用的表名列表
-        
-    Returns:
-        有用的表名列表
-    """
-    try:
-        # 首先尝试直接解析JSON
-        result = json.loads(response_text)
-        useful_tables = result.get('useful_tables', [])
-        if useful_tables and isinstance(useful_tables, list):
-            # 验证返回的表名是否在可用表名中
-            valid_tables = [table for table in useful_tables if table in all_table_names]
-            if valid_tables:
-                return valid_tables
-    
-    except json.JSONDecodeError:
-        pass
-    
-    # 如果JSON解析失败，尝试从响应中提取JSON块
-    import re
-    
-    # 查找代码块中的JSON
-    json_patterns = [
-        r'```json\s*(.*?)\s*```',
-        r'```\s*(.*?)\s*```',
-        r'\{[^{}]*"useful_tables"[^{}]*\}',
-    ]
-    
-    for pattern in json_patterns:
-        matches = re.findall(pattern, response_text, re.DOTALL | re.IGNORECASE)
-        for match in matches:
-            try:
-                result = json.loads(match.strip())
-                useful_tables = result.get('useful_tables', [])
-                if useful_tables and isinstance(useful_tables, list):
-                    valid_tables = [table for table in useful_tables if table in all_table_names]
-                    if valid_tables:
-                        _logger.info(f"从代码块中成功提取表名: {valid_tables}")
-                        return valid_tables
-            except json.JSONDecodeError:
-                continue
-    
-    # 如果还是失败，尝试直接从文本中找表名
-    found_tables = []
-    for table_name in all_table_names:
-        if table_name.lower() in response_text.lower():
-            found_tables.append(table_name)
-    
-    if found_tables:
-        _logger.warning(f"JSON解析失败，从文本中匹配到表名: {found_tables[:5]}...")  # 限制数量
-        return found_tables[:5]  # 限制返回数量，避免过多
-    
-    # 最后的fallback：返回前几个表
-    _logger.warning("LLM响应解析完全失败，返回前3个表作为fallback")
-    return all_table_names[:3]
-
-
-def _extract_useful_fields_from_response(response_text: str, all_field_names: List[str]) -> List[str]:
-    """
-    从LLM响应中提取有用的字段名列表 - 健壮版本
-    
-    Args:
-        response_text: LLM的原始响应文本
-        all_field_names: 所有可用的字段名列表
-        
-    Returns:
-        有用的字段名列表
-    """
-    try:
-        # 首先尝试直接解析JSON
-        result = json.loads(response_text)
-        useful_fields = result.get('useful_fields', [])
-        if useful_fields and isinstance(useful_fields, list):
-            # 验证返回的字段名是否在可用字段名中
-            valid_fields = [field for field in useful_fields if field in all_field_names]
-            if valid_fields:
-                return valid_fields
-    
-    except json.JSONDecodeError:
-        pass
-    
-    # 如果JSON解析失败，尝试从响应中提取JSON块
-    import re
-    
-    # 查找代码块中的JSON
-    json_patterns = [
-        r'```json\s*(.*?)\s*```',
-        r'```\s*(.*?)\s*```',
-        r'\{[^{}]*"useful_fields"[^{}]*\}',
-    ]
-    
-    for pattern in json_patterns:
-        matches = re.findall(pattern, response_text, re.DOTALL | re.IGNORECASE)
-        for match in matches:
-            try:
-                result = json.loads(match.strip())
-                useful_fields = result.get('useful_fields', [])
-                if useful_fields and isinstance(useful_fields, list):
-                    valid_fields = [field for field in useful_fields if field in all_field_names]
-                    if valid_fields:
-                        _logger.info(f"从代码块中成功提取字段名: {valid_fields}")
-                        return valid_fields
-            except json.JSONDecodeError:
-                continue
-    
-    # 如果还是失败，尝试直接从文本中找字段名
-    found_fields = []
-    for field_name in all_field_names:
-        if field_name.lower() in response_text.lower():
-            found_fields.append(field_name)
-    
-    if found_fields:
-        _logger.warning(f"JSON解析失败，从文本中匹配到字段名: {found_fields[:10]}...")  # 限制数量
-        return found_fields[:10]  # 限制返回数量，避免过多
-    
-    # 最后的fallback：返回所有字段
-    _logger.warning("LLM响应解析完全失败，返回所有字段作为fallback")
-    return all_field_names

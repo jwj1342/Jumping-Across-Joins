@@ -4,12 +4,14 @@
 
 ### 核心组件
 
-1. **通信模块 (Communicate.py)** - 状态和消息定义
+1. **通信模块 (Communicate.py)** - 状态、消息和输出 Schema 定义
 
    - SimpleState：图系统状态定义
    - SchemaInfo：Schema 信息结构
    - SQLExecutionResult：SQL 执行结果
    - SystemState：基础系统状态
+   - OutputSchema：输出结果格式定义
+   - AgentOutputParser：Agent 输出解析器
 
 2. **主程序模块 (main.py)** - 核心功能实现
 
@@ -57,10 +59,10 @@ graph TD
 ### 基本使用
 
 ```python
-from method.main import run_sql_generation_system
+from method.main import run
 
 # 方式1：直接使用主函数
-result = run_sql_generation_system(
+result = run(
     query="What is the total market value of USDC tokens in 2023?",
     database_id="CRYPTO",
     additional_info="",
@@ -105,23 +107,26 @@ python main.py -q "查询语句" --no-csv
 - `--additional-info, -a`: 额外信息（可选）
 - `--no-csv`: 不保存结果到 CSV 文件
 
-### 测试系统
-
-```bash
-# 快速测试
-python test_system.py --quick
-
-# 完整测试套件
-python test_system.py --full
-```
-
 ## API 接口
 
 ### 状态定义 (Communicate.py)
 
 ```python
-# SimpleState - 图系统状态
-class SimpleState(TypedDict):
+# 使用 Pydantic 模型定义输出格式
+class SQLExecutionResult(BaseModel):
+    success: bool
+    sql_query: str
+    result_data: List[Dict[str, Any]]
+    error_message: Optional[str] = None
+    execution_time: float
+
+class SchemaInfo(BaseModel):
+    useful_tables: Dict[str, Any]
+    total_tables_count: int
+    filtered_tables_count: int
+    database_id: str
+
+class SimpleState(BaseModel):
     user_query: str              # 用户查询
     database_id: str             # 数据库ID
     schema_info: Dict[str, Any]  # Schema信息
@@ -135,12 +140,15 @@ class SimpleState(TypedDict):
     error_message: str          # 错误信息
     is_completed: bool          # 是否完成
 
-# SchemaInfo - Schema信息结构
-class SchemaInfo(TypedDict):
-    useful_tables: Dict[str, Any]
-    total_tables_count: int
-    filtered_tables_count: int
-    database_id: str
+# 输出格式定义
+class OutputSchema(BaseModel):
+    success: bool
+    final_sql: str
+    final_result: List[Dict[str, Any]]
+    iterations: int
+    execution_time: float
+    csv_file: Optional[str] = None
+    error_message: Optional[str] = None
 ```
 
 ### InfoAgent 函数 (InfoAgent.py)
@@ -177,7 +185,8 @@ def quick_sql_test(sql: str, database_id: str) -> Dict[str, Any]
 
 ### 返回结果格式
 
-```json
+```python
+# 系统最终输出格式 (OutputSchema)
 {
     "success": true,
     "final_sql": "SELECT ...",
@@ -187,42 +196,30 @@ def quick_sql_test(sql: str, database_id: str) -> Dict[str, Any]
     "csv_file": "sql_result_CRYPTO_20231201_143022.csv",
     "error_message": null
 }
-```
 
-### InfoAgent 返回格式
-
-```json
+# SQL执行结果格式 (SQLExecutionResult)
 {
-  "useful_tables": {
-    "SCHEMA.TABLE_NAME": {
-      "schema": "SCHEMA",
-      "table": "TABLE_NAME",
-      "useful_fields": ["field1", "field2"],
-      "total_fields_count": 10,
-      "filtered_fields_count": 2
-    }
-  },
-  "total_tables_count": 50,
-  "filtered_tables_count": 3
-}
-```
-
-### SqlAgent 返回格式
-
-```json
-{
-    "user_query": "用户查询",
-    "generated_sql": "SELECT ...",
-    "execution_result": {
-        "success": true,
-        "sql_query": "SELECT ...",
-        "result_data": [...],
-        "error_message": null,
-        "execution_time": 1.2
-    },
     "success": true,
+    "sql_query": "SELECT ...",
     "result_data": [...],
-    "error_message": null
+    "error_message": null,
+    "execution_time": 1.2
+}
+
+# Schema信息格式 (SchemaInfo)
+{
+    "useful_tables": {
+        "SCHEMA.TABLE_NAME": {
+            "schema": "SCHEMA",
+            "table": "TABLE_NAME",
+            "useful_fields": ["field1", "field2"],
+            "total_fields_count": 10,
+            "filtered_fields_count": 2
+        }
+    },
+    "total_tables_count": 50,
+    "filtered_tables_count": 3,
+    "database_id": "CRYPTO"
 }
 ```
 

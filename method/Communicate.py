@@ -97,3 +97,79 @@ def create_system_state(
         "final_result": None,
         "is_completed": False
     }
+
+"""
+Pydantic models for structured output parsing in InfoAgent and SqlAgent.
+"""
+
+from typing import List, Optional
+from pydantic import BaseModel, Field
+
+
+class UsefulTablesResponse(BaseModel):
+    """Response model for table usefulness analysis."""
+    useful_tables: List[str] = Field(
+        description="List of table names that are useful for answering the user query"
+    )
+    reasoning: str = Field(
+        description="Brief explanation of why these tables were selected"
+    )
+
+
+class UsefulFieldsResponse(BaseModel):
+    """Response model for field usefulness analysis."""
+    useful_fields: List[str] = Field(
+        description="List of field names that are useful for answering the user query"
+    )
+    reasoning: str = Field(
+        description="Brief explanation of why these fields were selected"
+    )
+
+
+class SqlQueryResponse(BaseModel):
+    """Response model for SQL query generation."""
+    sql_query: str = Field(
+        description="The generated SQL query"
+    )
+    explanation: str = Field(
+        description="Explanation of what the SQL query does"
+    )
+    potential_issues: Optional[str] = Field(
+        default=None,
+        description="Any potential issues or notes about the query"
+    )
+
+
+class ErrorAnalysisResponse(BaseModel):
+    """Response model for SQL error analysis."""
+    error_type: str = Field(
+        description="Type of error (e.g., 'syntax_error', 'table_not_found', 'field_not_found')"
+    )
+    cause: str = Field(
+        description="Root cause of the error"
+    )
+    missing_info: Optional[str] = Field(
+        default=None,
+        description="Missing schema information that needs to be gathered"
+    )
+    suggestions: str = Field(
+        description="Suggestions for fixing the error"
+    )
+
+
+class SchemaInfoResponse(BaseModel):
+    """Response model for schema information gathering."""
+    tables_info: str = Field(
+        description="Detailed information about relevant tables"
+    )
+    relationships: Optional[str] = Field(
+        default=None,
+        description="Relationships between tables"
+    )
+    suggestions: str = Field(
+        description="Suggestions for SQL generation"
+    )
+    missing_info: Optional[str] = Field(
+        default=None,
+        description="Information that still needs to be gathered"
+    ) 
