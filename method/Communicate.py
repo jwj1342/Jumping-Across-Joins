@@ -37,7 +37,7 @@ class SQLExecutionResult(TypedDict):
 
 # ===== 系统状态（使用LangGraph内置消息管理）=====
 
-class SimpleState(TypedDict):
+class SystemState(TypedDict):
     """图系统状态 - 使用LangGraph内置消息管理"""
     user_query: str
     database_id: str
@@ -97,25 +97,3 @@ class SqlErrorContext(TypedDict):
     retry_count: int
     max_retries: int
     # 注意：消息历史直接由LangGraph状态中的messages字段管理
-
-# ===== 工具函数 =====
-
-def can_retry(state: SimpleState) -> bool:
-    """检查是否可以重试"""
-    return state["retry_count"] < state["max_retries"]
-
-def increment_retry(state: SimpleState) -> Dict[str, Any]:
-    """增加重试次数，返回状态更新"""
-    return {"retry_count": state["retry_count"] + 1}
-
-def create_error_context(state: SimpleState) -> SqlErrorContext:
-    """从系统状态创建错误上下文"""
-    return {
-        "user_query": state["user_query"],
-        "original_sql": state["generated_sql"],
-        "error_message": state["error_message"],
-        "database_id": state["database_id"],
-        "schema_info": state["schema_info"],
-        "retry_count": state["retry_count"],
-        "max_retries": state["max_retries"]
-    }

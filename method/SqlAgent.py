@@ -173,8 +173,7 @@ def fix_sql_with_conversation(context: SqlErrorContext, error_analysis: Dict[str
             return {
                 "success": False,
                 "fixed_sql": "",
-                "explanation": "LLM未初始化，无法修复SQL",
-                "confidence": 0
+                "explanation": "LLM未初始化，无法修复SQL"
             }
         
         # 创建修复chain
@@ -201,23 +200,20 @@ def fix_sql_with_conversation(context: SqlErrorContext, error_analysis: Dict[str
             result = {
                 "success": True,
                 "fixed_sql": response.get("fixed_sql", ""),
-                "explanation": response.get("explanation", ""),
-                "confidence": response.get("confidence", 5)
+                "explanation": response.get("explanation", "")
             }
         elif hasattr(response, 'fixed_sql'):
             result = {
                 "success": True,
                 "fixed_sql": response.fixed_sql,
-                "explanation": response.explanation,
-                "confidence": response.confidence
+                "explanation": response.explanation
             }
         else:
             _logger.warning(f"未知的SQL修复响应格式: {type(response)}")
             result = {
                 "success": False,
                 "fixed_sql": "",
-                "explanation": "SQL修复响应格式异常",
-                "confidence": 0
+                "explanation": "SQL修复响应格式异常"
             }
         
         return result
@@ -227,8 +223,7 @@ def fix_sql_with_conversation(context: SqlErrorContext, error_analysis: Dict[str
         return {
             "success": False,
             "fixed_sql": "",
-            "explanation": f"SQL修复失败: {e}",
-            "confidence": 0
+            "explanation": f"SQL修复失败: {e}"
         }
 
 
@@ -392,13 +387,8 @@ def run_sql_agent(user_query: str, schema_info: DatabaseSummary, database_id: st
                 
                 if fix_result["success"] and fix_result["fixed_sql"]:
                     current_sql = fix_result["fixed_sql"]
-                    _logger.info(f"SQL已修复，信心度: {fix_result['confidence']}")
+                    _logger.info(f"SQL已修复")
                     _logger.info(f"修复说明: {fix_result['explanation']}")
-                    
-                    # 如果信心度太低，也停止重试
-                    if fix_result["confidence"] < 3:
-                        _logger.warning("修复信心度过低，停止重试")
-                        break
                 else:
                     _logger.error("SQL修复失败，停止重试")
                     break

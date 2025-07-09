@@ -18,14 +18,14 @@ from langgraph.types import Send
 current_dir = Path(__file__).parent
 sys.path.insert(0, str(current_dir))
 
-from Communicate import SimpleState
+from Communicate import SystemState
 
 # 全局配置
 logger = logging.getLogger(__name__)
 
 # ===== InfoAgent 实现 =====
 
-def info_agent_node(state: SimpleState) -> Dict[str, Any]:
+def info_agent_node(state: SystemState) -> Dict[str, Any]:
     """InfoAgent节点 - 纯函数式实现"""
     try:
         logger.info("InfoAgent开始处理schema信息")
@@ -65,7 +65,7 @@ def info_agent_node(state: SimpleState) -> Dict[str, Any]:
 
 # ===== SqlAgent 函数式实现 =====
 
-def sql_agent_node(state: SimpleState) -> Union[Dict[str, Any], Send]:
+def sql_agent_node(state: SystemState) -> Union[Dict[str, Any], Send]:
     """SqlAgent节点 - 纯函数式实现"""
     try:
         logger.info("SqlAgent开始生成和执行SQL")
@@ -119,7 +119,7 @@ def sql_agent_node(state: SimpleState) -> Union[Dict[str, Any], Send]:
 
 # ===== 辅助节点函数 =====
 
-def result_handler_node(state: SimpleState) -> Dict[str, Any]:
+def result_handler_node(state: SystemState) -> Dict[str, Any]:
     """结果处理节点"""
     logger.info("处理最终结果")
     
@@ -131,7 +131,7 @@ def result_handler_node(state: SimpleState) -> Dict[str, Any]:
 
 # ===== 路由函数 =====
 
-def route_completion(state: SimpleState) -> str:
+def route_completion(state: SystemState) -> str:
     """路由到完成状态"""
     if state["is_completed"]:
         return "end"
@@ -260,7 +260,7 @@ def run(
         logger.info("初始化SQL生成系统...")
         
         # 创建图
-        workflow = StateGraph(SimpleState)
+        workflow = StateGraph(SystemState)
         
         # 添加节点
         workflow.add_node("info_agent_node", info_agent_node)  
@@ -285,7 +285,7 @@ def run(
         
         
         # 初始状态
-        initial_state: SimpleState = {
+        initial_state: SystemState = {
             "user_query": query,
             "database_id": database_id,
             "schema_info": {},
@@ -387,7 +387,7 @@ def main():
     
     # 解析命令行参数
     parser = argparse.ArgumentParser(description='SQL生成系统')
-    parser.add_argument('--query', '-q',default="Which Ethereum address has the top 3 smallest positive balance from transactions involving the token at address \"0xa92a861fc11b99b24296af880011b47f9cafb5ab\"?", type=str, help='用户查询语句')
+    parser.add_argument('--query', '-q',default="I want to compute and compare the cumulative count of Ethereum smart contracts created by users versus created by other contracts. Please list out the daily cumulative tallies between 2017 and 2021.", type=str, help='用户查询语句')
     parser.add_argument('--database', '-d', type=str, default='CRYPTO', help='数据库ID (默认: CRYPTO)')
     parser.add_argument('--additional-info', '-a', type=str, default='', help='额外信息')
     parser.add_argument('--no-csv', action='store_true', help='不保存结果到CSV文件')

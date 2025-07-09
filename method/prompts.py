@@ -33,10 +33,6 @@ class SqlFixResponse(BaseModel):
     explanation: str = Field(
         description="修复说明"
     )
-    confidence: int = Field(
-        description="修复信心度(1-10)",
-        ge=1, le=10
-    )
 
 # Initialize output parsers
 sql_parser = JsonOutputParser(pydantic_object=SqlQueryResponse)
