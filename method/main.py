@@ -3,8 +3,6 @@ SQL生成系统 - 函数式编程版本
 整合了图系统和主程序功能
 """
 
-import os
-import json
 import logging
 import argparse
 from pathlib import Path
@@ -12,11 +10,9 @@ import time
 import csv
 import sys
 from datetime import datetime
-from typing import Dict, Any, Optional, List, Union
-
-from langgraph.graph import StateGraph, END, START
+from typing import Dict, Any, Union
+from langgraph.graph import StateGraph, END
 from langgraph.types import Send
-from langgraph.checkpoint.memory import MemorySaver
 
 # 将当前目录添加到Python路径中
 current_dir = Path(__file__).parent
@@ -26,7 +22,6 @@ from Communicate import SimpleState
 
 # 全局配置
 logger = logging.getLogger(__name__)
-MAX_ITERATIONS = 3
 
 # ===== InfoAgent 实现 =====
 
@@ -76,10 +71,10 @@ def sql_agent_node(state: SimpleState) -> Union[Dict[str, Any], Send]:
         logger.info("SqlAgent开始生成和执行SQL")
         
         # 使用纯函数式SqlAgent
-        from SqlAgent import run_sql
+        from SqlAgent import run_sql_agent
         
         # 处理完整查询流程
-        result = run_sql(
+        result = run_sql_agent(
             state["user_query"],
             state["schema_info"],
             state["database_id"]
@@ -104,28 +99,14 @@ def sql_agent_node(state: SimpleState) -> Union[Dict[str, Any], Send]:
                 "is_completed": True
             })
         else:
-            # 执行失败，检查错误类型和是否应该重试
-            error_message = result.get("error_message", "")
-            should_retry = _should_retry_error(error_message, state["iteration"], state["max_iterations"])
-            
-            if should_retry:
-                logger.warning(f"SQL执行失败，尝试第 {state['iteration'] + 1} 次重试")
-                logger.warning(f"错误信息: {error_message}")
-                # 发送回InfoAgent重新获取schema
-                return Send("info_agent_node", {
-                    **updated_state,
-                    "error_message": result["error_message"],
-                    "step": "retry"
-                })
-            else:
-                # 不应该重试或达到最大重试次数
-                logger.error(f"错误不可重试或达到最大重试次数，处理失败: {error_message}")
-                return {
-                    **updated_state,
-                    "step": "failed",
-                    "error_message": result["error_message"],
-                    "is_completed": True
-                }
+            # 执行失败，SqlAgent内部已经处理了错误分析和重试逻辑
+            logger.error(f"SQL执行失败，处理完成: {result.get('error_message', '')}")
+            return {
+                **updated_state,
+                "step": "failed", 
+                "error_message": result["error_message"],
+                "is_completed": True
+            }
         
     except Exception as e:
         logger.error(f"SqlAgent处理失败: {e}")
@@ -156,65 +137,7 @@ def route_completion(state: SimpleState) -> str:
         return "end"
     return "continue"
 
-def _should_retry_error(error_message: str, current_iteration: int, max_iterations: int) -> bool:
-    """
-    判断错误是否应该重试
-    
-    Args:
-        error_message: 错误消息
-        current_iteration: 当前迭代次数
-        max_iterations: 最大迭代次数
-        
-    Returns:
-        是否应该重试
-    """
-    # 检查是否达到最大重试次数
-    if current_iteration >= max_iterations:
-        return False
-    
-    if not error_message:
-        return True
-    
-    error_lower = error_message.lower()
-    
-    # 不应该重试的错误类型
-    non_retryable_errors = [
-        "syntax error",           # 语法错误
-        "unexpected 'json'",      # JSON格式错误
-        "无法提取有效的sql语句",     # SQL提取失败
-        "llm未初始化",           # LLM初始化失败
-        "authentication",        # 认证失败
-        "permission",           # 权限问题
-        "privilege",            # 权限问题
-        "timeout",              # 超时（通常不是schema问题）
-        "database", "does not exist", "not authorized",  # 数据库不存在或权限问题
-        "invalid identifier",    # 字段名错误（需要更准确的schema，而非重试）
-        "compilation error",     # SQL编译错误
-    ]
-    
-    # 检查是否包含不可重试的错误
-    for non_retryable in non_retryable_errors:
-        if non_retryable in error_lower:
-            logger.info(f"检测到不可重试错误: {non_retryable}")
-            return False
-    
-    # 可重试的错误类型
-    retryable_errors = [
-        "does not exist",        # 表或列不存在
-        "object does not exist", # 对象不存在
-        "invalid identifier",    # 无效标识符
-        "column",               # 列相关错误
-        "table",                # 表相关错误
-    ]
-    
-    # 检查是否包含可重试的错误
-    for retryable in retryable_errors:
-        if retryable in error_lower:
-            logger.info(f"检测到可重试错误: {retryable}")
-            return True
-    
-    # 默认情况下，第一次失败可以重试
-    return current_iteration == 0
+
 
 # ===== 工具函数 =====
 
@@ -370,7 +293,6 @@ def run(
             "execution_result": {},
             "step": "start",
             "iteration": 0,
-            "max_iterations": MAX_ITERATIONS,
             "final_sql": "",
             "final_result": [],
             "error_message": "",

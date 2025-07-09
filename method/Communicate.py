@@ -3,8 +3,10 @@
 InfoAgent → SqlAgent：提供经过LLM过滤的有用表和字段信息
 """
 
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Annotated
 from typing_extensions import TypedDict
+from langchain_core.messages import BaseMessage
+from langgraph.graph.message import add_messages
 
 # ===== 数据库摘要树结构定义 =====
 
@@ -23,11 +25,8 @@ class DatabaseSummary(TypedDict):
     database: str
     schemas: List[SchemaSummary]
 
-# ===== 现有结构更新 =====
+# ===== SQL执行结果 =====
 
-# 精简的消息结构 (SchemaInfo 已被 DatabaseSummary 替代)
-
-# SQL执行结果（SqlAgent使用）
 class SQLExecutionResult(TypedDict):
     """SQL执行结果"""
     success: bool
@@ -36,13 +35,17 @@ class SQLExecutionResult(TypedDict):
     error_message: Optional[str]
     execution_time: Optional[float]
 
-# 系统状态
+# ===== 系统状态（使用LangGraph内置消息管理）=====
+
 class SimpleState(TypedDict):
-    """图系统状态"""
+    """图系统状态 - 使用LangGraph内置消息管理"""
     user_query: str
     database_id: str
     
-    # InfoAgent相关 (已更新为新的摘要树结构)
+    # 使用LangGraph的add_messages来管理对话历史
+    messages: Annotated[List[BaseMessage], add_messages]
+    
+    # InfoAgent相关
     schema_info: DatabaseSummary
     
     # SqlAgent相关  
@@ -52,7 +55,8 @@ class SimpleState(TypedDict):
     # 流程控制
     step: str
     iteration: int
-    max_iterations: int
+    retry_count: int  # 直接在状态中管理重试次数
+    max_retries: int  # 最大重试次数
     
     # 结果
     final_sql: str
@@ -80,3 +84,38 @@ class SqlQueryResponse(BaseModel):
         default=None,
         description="Any potential issues or notes about the query"
     )
+
+# ===== SQL错误修复上下文（简化版）=====
+
+class SqlErrorContext(TypedDict):
+    """SQL错误上下文信息 - 简化版，使用LangGraph消息管理"""
+    user_query: str
+    original_sql: str
+    error_message: str
+    database_id: str
+    schema_info: DatabaseSummary
+    retry_count: int
+    max_retries: int
+    # 注意：消息历史直接由LangGraph状态中的messages字段管理
+
+# ===== 工具函数 =====
+
+def can_retry(state: SimpleState) -> bool:
+    """检查是否可以重试"""
+    return state["retry_count"] < state["max_retries"]
+
+def increment_retry(state: SimpleState) -> Dict[str, Any]:
+    """增加重试次数，返回状态更新"""
+    return {"retry_count": state["retry_count"] + 1}
+
+def create_error_context(state: SimpleState) -> SqlErrorContext:
+    """从系统状态创建错误上下文"""
+    return {
+        "user_query": state["user_query"],
+        "original_sql": state["generated_sql"],
+        "error_message": state["error_message"],
+        "database_id": state["database_id"],
+        "schema_info": state["schema_info"],
+        "retry_count": state["retry_count"],
+        "max_retries": state["max_retries"]
+    }
