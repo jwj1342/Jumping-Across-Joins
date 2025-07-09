@@ -39,20 +39,74 @@
 
 ```mermaid
 graph TD
-    A[用户输入Query] --> B[InfoAgent探索Schema]
-    B --> C[SQLAgent生成SQL]
-    C --> D[执行SQL]
-    D --> E{执行成功?}
-    E -->|是| F[结果验证]
-    E -->|否| G[错误分析]
-    G --> H[InfoAgent补充信息]
-    H --> C
-    F --> I{结果为空?}
-    I -->|是| J[语义校验]
-    I -->|否| K[输出结果]
-    J --> H
-    K --> L[完成]
+    subgraph "开始"
+        A[用户输入: Query + DB_ID]
+    end
+
+    subgraph "InfoAgent: Schema探索与筛选"
+        B(info_agent_node)
+    end
+
+    subgraph "SqlAgent: SQL生成与执行"
+        C(sql_agent_node)
+    end
+
+    subgraph "主控流程 (main.py)"
+        D{SQL执行成功?}
+        E{错误可重试且未达上限?}
+    end
+
+    subgraph "结束"
+        F[result_handler_node / 成功]
+        G[流程终止 / 失败]
+    end
+
+    A --> B
+    B -- 筛选后的Schema信息 --> C
+    C -- 执行结果 --> D
+    D -- Yes --> F
+    D -- No --> E
+    E -- Yes, 返回重试 --> B
+    E -- No --> G
 ```
+
+上面的流程图展示了系统处理一个用户查询的完整生命周期。数据在各个核心节点之间流转，并通过条件判断来决定流程的走向，具体步骤如下：
+
+1.  **开始 (用户输入)**
+
+    - **数据**: 用户提供自然语言查询（`Query`）和目标数据库的标识（`DB_ID`）。
+    - **动作**: `main.py`中的`run`函数接收这些输入，并初始化`langgraph`的状态图，启动整个流程。流程的第一个节点是`info_agent_node`。
+
+2.  **`info_agent_node` (Schema 探索与筛选)**
+
+    - **输入**: `Query` 和 `DB_ID`。
+    - **动作**:
+      1.  **查询图数据库**: 首先，该节点通过`InfoAgent.py`中的函数，连接到一个 Neo4j 图数据库，获取与`DB_ID`相关的所有表的元数据。
+      2.  **LLM 筛选表**: 然后，它将用户`Query`和所有表信息发送给大型语言模型（LLM），使用`TABLE_USEFULNESS_PROMPT`提示词，让 LLM 判断哪些表与回答用户问题最相关。
+      3.  **LLM 筛选字段**: 接着，对于每个被选中的"相关表"，它会获取该表的所有字段，并再次请求 LLM（使用`FIELD_USEFULNESS_PROMPT`），从这些字段中筛选出与用户`Query`最相关的字段。
+    - **输出**: 一个高度精炼、只包含相关表和相关字段的`Schema信息`对象。这个对象被传递给下一个节点`sql_agent_node`。这一步极大地减少了后续 SQL 生成的干扰信息。
+
+3.  **`sql_agent_node` (SQL 生成与执行)**
+
+    - **输入**: 用户`Query`, `DB_ID`, 以及上一步骤筛选出的`Schema信息`。
+    - **动作**:
+      1.  **生成 SQL**: `SqlAgent.py`中的函数接收到这些信息，并使用`SQL_AGENT_PROMPT`提示词，再次请求 LLM。这个提示词会指导 LLM 根据精炼的`Schema信息`生成精确的、符合 Snowflake 数据库规范的 SQL 语句。
+      2.  **执行 SQL**: 生成的 SQL 语句会立即在目标 Snowflake 数据库上执行。这个过程被设计为"失败安全"的，即便是 SQL 有误，程序也不会崩溃，而是会捕获错误信息。
+    - **输出**: 一个包含执行结果的字典，其中包括一个`success`布尔标志，以及成功时返回的数据或失败时的`error_message`。
+
+4.  **条件判断 (主控流程)**
+
+    - **输入**: `sql_agent_node`的输出结果。
+    - **`SQL执行成功?`**: `main.py`检查`success`标志。
+      - **Yes**: 如果为`true`，流程直接走向`result_handler_node`，准备成功退出。
+      - **No**: 如果为`false`，流程进入下一个判断。
+    - **`错误可重试且未达上限?`**: `main.py`中的`_should_retry_error`函数会分析`error_message`。
+      - **Yes**: 如果错误是由于找不到表或列等"可重试"错误（意味着`InfoAgent`提供的 Schema 信息有误），并且当前重试次数没有超过上限（默认为 3 次），流程将**返回到`info_agent_node`**，形成一个自我修正的循环，期望在下一次获取到更准确的 Schema 信息。
+      - **No**: 如果错误是 SQL 语法错误等"不可重试"错误，或已达到最大重试次数，流程将直接走向失败的终点。
+
+5.  **结束**
+    - **`result_handler_node / 成功`**: 当 SQL 成功执行后，该节点被调用，它将最终结果（SQL 语句、查询数据等）格式化，并将流程状态标记为完成，程序成功退出。
+    - **`流程终止 / 失败`**: 在不可重试的错误或达到重试上限后，流程终止，并报告最终的错误信息。
 
 ## 使用方法
 

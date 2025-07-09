@@ -2,7 +2,7 @@ from langchain.chat_models import init_chat_model
 import os
 import logging
 
-def initialize_llm() :
+def initialize_llm(test=False) :
     """
     初始化LLM实例
     
@@ -16,15 +16,15 @@ def initialize_llm() :
     try:
         
         llm = init_chat_model(model=model, model_provider="openai")
-        # 测试LLM连接（简化测试）
-        try:
-            test_result = llm.invoke("Hello")
-            if test_result:
-                logging.info(f"LLM连接测试成功")
-            else:
-                logging.warning("LLM连接测试返回空结果")
-        except Exception as e:
-            logging.warning(f"LLM连接测试失败，但继续运行: {e}")
+        if test:
+            try:
+                test_result = llm.invoke("Hello")
+                if test_result:
+                    logging.info(f"LLM连接测试成功")
+            except Exception as e:
+                logging.warning(f"LLM连接测试失败，但继续运行: {e}")
+        else:
+            logging.debug("LLM连接测试跳过")
         
         return llm
         

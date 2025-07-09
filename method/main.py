@@ -36,20 +36,26 @@ def info_agent_node(state: SimpleState) -> Dict[str, Any]:
         logger.info("InfoAgent开始处理schema信息")
         
         # 使用纯函数式InfoAgent
-        from InfoAgent import prepare_schema_info
+        from InfoAgent import get_db_summary
         
-        # 获取schema信息
-        schema_info = prepare_schema_info(
-            state["user_query"], 
-            state["database_id"]
-        )
+        # 获取数据库摘要树
+        db_summary = get_db_summary(state["database_id"])
         
-        logger.info(f"InfoAgent完成，获取到 {len(schema_info.get('useful_tables', {}))} 个有用表")
+        if not db_summary:
+            logger.error(f"无法为数据库 {state['database_id']} 获取摘要树，流程终止。")
+            return {
+                **state,
+                "step": "error",
+                "error_message": f"InfoAgent错误: 未能获取数据库摘要树。",
+                "is_completed": True
+            }
+
+        logger.info(f"InfoAgent完成，已成功获取数据库摘要树。")
         
         # 使用Send API发送到SqlAgent
         return Send("sql_agent_node", {
             **state,
-            "schema_info": schema_info,
+            "schema_info": db_summary,
             "step": "schema_ready"
         })
         
@@ -70,10 +76,10 @@ def sql_agent_node(state: SimpleState) -> Union[Dict[str, Any], Send]:
         logger.info("SqlAgent开始生成和执行SQL")
         
         # 使用纯函数式SqlAgent
-        from SqlAgent import process_query
+        from SqlAgent import run_sql
         
         # 处理完整查询流程
-        result = process_query(
+        result = run_sql(
             state["user_query"],
             state["schema_info"],
             state["database_id"]
@@ -354,13 +360,7 @@ def run(
         # 编译图
         graph = workflow.compile()
         
-        # 保存工作流程图
-        try:
-            workflow_graph = graph.get_graph()
-            workflow_graph.draw_mermaid_png().save("workflow.png")
-            logger.info("工作流程图已保存至: workflow.png")
-        except Exception as e:
-            logger.warning(f"保存工作流程图失败: {e}")
+        
         # 初始状态
         initial_state: SimpleState = {
             "user_query": query,
