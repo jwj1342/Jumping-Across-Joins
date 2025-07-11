@@ -137,42 +137,53 @@ class NodeCreator:
             return False
     
     def _escape_string(self, text: str) -> str:
-        """超强力字符串转义方法，彻底解决Cypher查询中的特殊字符问题"""
+        """正确的Cypher字符串转义方法，解决Neo4j查询中的特殊字符问题"""
         if not text:
             return ""
         
         # 转换为字符串并限制长度
         cleaned_text = str(text)
-        if len(cleaned_text) > 500:
-            cleaned_text = cleaned_text[:500] + "..."
+        # 更保守的长度限制，避免Cypher查询过长
+        if len(cleaned_text) > 1000:
+            cleaned_text = cleaned_text[:1000] + "..."
+        
+        # 调试代码已移除
         
         # 第一步：移除所有控制字符和不可见字符
         import re
         # 移除所有ASCII控制字符 (0-31) 和 DEL (127)
         cleaned_text = re.sub(r'[\x00-\x1f\x7f]', ' ', cleaned_text)
         
-        # 第二步：转义所有可能导致问题的字符
-        # 使用更激进的转义策略
-        cleaned_text = cleaned_text.replace('\\', '\\\\')  # 反斜杠
-        cleaned_text = cleaned_text.replace("'", "\\'")    # 单引号
-        cleaned_text = cleaned_text.replace('"', '\\"')    # 双引号
+        # 第二步：强力处理所有可能的换行符和控制字符
+        # 使用正则表达式移除所有空白字符（包括各种换行符）
+        cleaned_text = re.sub(r'[\r\n\t\f\v\u0085\u2028\u2029]+', ' ', cleaned_text)
         
-        # 第三步：确保没有任何换行符残留
-        cleaned_text = cleaned_text.replace('\n', ' ')     # 换行符
-        cleaned_text = cleaned_text.replace('\r', ' ')     # 回车符
+        # 额外确保移除任何剩余的换行符
+        cleaned_text = cleaned_text.replace('\n', ' ')     # 标准换行符
+        cleaned_text = cleaned_text.replace('\r', ' ')     # 回车符  
         cleaned_text = cleaned_text.replace('\t', ' ')     # 制表符
+        cleaned_text = cleaned_text.replace('\f', ' ')     # 换页符
+        cleaned_text = cleaned_text.replace('\v', ' ')     # 垂直制表符
+        cleaned_text = cleaned_text.replace('\u0085', ' ') # NEL (Next Line)
+        cleaned_text = cleaned_text.replace('\u2028', ' ') # 行分隔符
+        cleaned_text = cleaned_text.replace('\u2029', ' ') # 段落分隔符
         
-        # 第四步：处理Unicode换行符
-        cleaned_text = cleaned_text.replace('\u2028', ' ')  # 行分隔符
-        cleaned_text = cleaned_text.replace('\u2029', ' ')  # 段落分隔符
+        # 第四步：在Neo4j Cypher中正确转义字符和移除问题字符
+        # 关键修复：移除分号，避免CypherExecutor错误分割语句
+        cleaned_text = cleaned_text.replace(';', ',')      # 分号替换为逗号
+        # 在Cypher字符串字面量中，单引号用反斜杠转义
+        cleaned_text = cleaned_text.replace('\\', '\\\\')  # 反斜杠转义（必须先转义反斜杠）
+        cleaned_text = cleaned_text.replace("'", "\\'")    # 单引号转义
         
         # 第五步：清理多余的空格
         cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
         
-        # 第六步：最后安全检查 - 如果仍包含问题字符，直接移除
+        # 第六步：最后安全检查 - 移除任何残留的问题字符
         if any(ord(c) < 32 for c in cleaned_text):
             cleaned_text = ''.join(c if ord(c) >= 32 else ' ' for c in cleaned_text)
             cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
+        
+        # 调试代码已移除
         
         return cleaned_text
     

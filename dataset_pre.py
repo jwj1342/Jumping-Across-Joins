@@ -68,6 +68,52 @@ def get_available_databases(input_file: str) -> set:
     
     return db_ids
 
+def filter_by_instance_ids(input_file: str, output_file: str, target_instance_ids: list) -> None:
+    """
+    根据 instance_id 列表过滤 JSONL 文件
+    
+    Args:
+        input_file (str): 输入文件路径
+        output_file (str): 输出文件路径
+        target_instance_ids (list): 目标 instance_id 列表
+    """
+    target_ids_set = set(target_instance_ids)
+    filtered_lines = []
+    total_lines = 0
+    found_ids = set()
+    
+    # 读取原始文件
+    with open(input_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            total_lines += 1
+            try:
+                data = json.loads(line.strip())
+                instance_id = data.get('instance_id')
+                if instance_id in target_ids_set:
+                    filtered_lines.append(data)
+                    found_ids.add(instance_id)
+            except json.JSONDecodeError as e:
+                print(f"警告：跳过无效的 JSON 行 (行 {total_lines}): {e}")
+                continue
+    
+    # 写入过滤后的数据
+    with open(output_file, 'w', encoding='utf-8') as f:
+        for data in filtered_lines:
+            json_line = json.dumps(data, ensure_ascii=False)
+            f.write(json_line + '\n')
+    
+    # 检查缺失的 ID
+    missing_ids = target_ids_set - found_ids
+    
+    print(f"Instance ID 过滤完成！")
+    print(f"- 总行数: {total_lines}")
+    print(f"- 目标 instance_id 数量: {len(target_instance_ids)}")
+    print(f"- 找到的数据行数: {len(filtered_lines)}")
+    print(f"- 输出文件: {output_file}")
+    
+    if missing_ids:
+        print(f"- 未找到的 instance_id: {sorted(missing_ids)}")
+
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(
@@ -78,6 +124,8 @@ def main():
   python3 dataset_pre.py --db_id CRYPTO
   python3 dataset_pre.py --db_id GA360 --input custom_input.jsonl
   python3 dataset_pre.py --list-databases
+  python3 dataset_pre.py --instance_ids sf_bq025 sf_bq006 sf_bq016
+  python3 dataset_pre.py --instance_ids sf_bq025 sf_bq006 --output custom_output.jsonl
         '''
     )
     
@@ -89,6 +137,8 @@ def main():
                        help='输出文件路径（默认：spider2-snow-{db_id}.jsonl）')
     parser.add_argument('--list-databases', action='store_true',
                        help='列出输入文件中所有可用的数据库ID')
+    parser.add_argument('--instance_ids', nargs='+', 
+                       help='要筛选的 instance_id 列表（用空格分隔）')
     
     args = parser.parse_args()
     
@@ -107,9 +157,34 @@ def main():
         print(f"\n总共 {len(db_ids)} 个数据库")
         return
     
+    # 处理 instance_ids 过滤
+    if args.instance_ids:
+        # 设置输出文件名
+        if args.output:
+            output_file = args.output
+        else:
+            output_file = f"spider2-snow-instances.jsonl"
+        
+        # 执行基于 instance_id 的过滤
+        filter_by_instance_ids(args.input, output_file, args.instance_ids)
+        
+        # 显示过滤后的数据样本
+        print(f"\n过滤后的数据样本（Instance IDs）：")
+        with open(output_file, 'r', encoding='utf-8') as f:
+            for i, line in enumerate(f):
+                if i < 3:  # 显示前3行样本
+                    data = json.loads(line.strip())
+                    print(f"样本 {i+1}:")
+                    print(f"  ID: {data.get('instance_id', 'N/A')}")
+                    print(f"  指令: {data.get('instruction', 'N/A')[:100]}...")
+                    print(f"  数据库: {data.get('db_id', 'N/A')}")
+                    print(f"  外部知识: {data.get('external_knowledge', 'N/A')}")
+                    print()
+        return
+    
     # 检查是否提供了数据库ID
     if not args.db_id:
-        print("错误：请提供要筛选的数据库ID（使用 --db_id 参数）")
+        print("错误：请提供要筛选的数据库ID（使用 --db_id 参数）或 instance_id 列表（使用 --instance_ids 参数）")
         print("使用 --list-databases 查看所有可用的数据库ID")
         return
     

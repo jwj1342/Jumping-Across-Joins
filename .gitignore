@@ -5,3 +5,4 @@ __pycache__/
 *_report.json
 *results/
 .vscode/
+resource/vector/

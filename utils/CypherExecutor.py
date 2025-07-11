@@ -166,6 +166,7 @@ class CypherExecutor:
                 result = session.execute_write(
                     self._execute_multiple_cypher_in_transaction,
                     cypher_statement,
+                    parameters
                 )
                 self._log_info("事务成功提交。")
                 return True, result
