@@ -7,135 +7,220 @@ import logging
 import argparse
 from pathlib import Path
 import time
-import csv
 import sys
+import json
 from datetime import datetime
-from typing import Dict, Any, Union
-from langgraph.graph import StateGraph, END
-from langgraph.types import Send
+from typing import Dict, Any, List, Tuple
+import jsonlines
+import threading
+import tempfile
+import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
+import os
 
 # 将当前目录添加到Python路径中
 current_dir = Path(__file__).parent
 sys.path.insert(0, str(current_dir))
 
 from Communicate import SystemState
+from BuildAgentSystem import build_agent_system
+
+# 导入连接池模块
+try:
+    from utils.SnowflakeConnectionPool import get_global_pool, close_global_pool, get_pool_stats
+    HAS_CONNECTION_POOL = True
+except ImportError:
+    HAS_CONNECTION_POOL = False
 
 # 全局配置
 logger = logging.getLogger(__name__)
 
-# ===== InfoAgent 实现 =====
+# 全局锁用于线程安全
+file_lock = threading.Lock()
+log_lock = threading.Lock()
 
-def info_agent_node(state: SystemState) -> Dict[str, Any]:
-    """InfoAgent节点 - 纯函数式实现"""
-    try:
-        logger.info("InfoAgent开始处理schema信息")
-        
-        # 使用纯函数式InfoAgent
-        from InfoAgent import get_db_summary
-        
-        # 获取数据库摘要树
-        db_summary = get_db_summary(state["database_id"])
-        
-        if not db_summary:
-            logger.error(f"无法为数据库 {state['database_id']} 获取摘要树，流程终止。")
-            return {
-                **state,
-                "step": "error",
-                "error_message": f"InfoAgent错误: 未能获取数据库摘要树。",
-                "is_completed": True
-            }
-
-        logger.info(f"InfoAgent完成，已成功获取数据库摘要树。")
-        
-        # 使用Send API发送到SqlAgent
-        return Send("sql_agent_node", {
-            **state,
-            "schema_info": db_summary,
-            "step": "schema_ready"
-        })
-        
-    except Exception as e:
-        logger.error(f"InfoAgent处理失败: {e}")
-        return {
-            **state,
-            "step": "error",
-            "error_message": f"InfoAgent错误: {e}",
-            "is_completed": True
-        }
-
-# ===== SqlAgent 函数式实现 =====
-
-def sql_agent_node(state: SystemState) -> Union[Dict[str, Any], Send]:
-    """SqlAgent节点 - 纯函数式实现"""
-    try:
-        logger.info("SqlAgent开始生成和执行SQL")
-        
-        # 使用纯函数式SqlAgent
-        from SqlAgent import run_sql_agent
-        
-        # 处理完整查询流程
-        result = run_sql_agent(
-            state["user_query"],
-            state["schema_info"],
-            state["database_id"]
-        )
-        
-        # 更新状态
-        updated_state = {
-            **state,
-            "generated_sql": result["generated_sql"],
-            "execution_result": result["execution_result"],
-            "step": "sql_executed",
-            "iteration": state["iteration"] + 1
-        }
-        
-        if result["success"]:
-            # 成功执行，发送到结果处理节点
-            logger.info("SQL执行成功，发送到结果处理")
-            return Send("result_handler_node", {
-                **updated_state,
-                "final_sql": result["generated_sql"],
-                "final_result": result["result_data"] or [],
-                "is_completed": True
-            })
-        else:
-            # 执行失败，SqlAgent内部已经处理了错误分析和重试逻辑
-            logger.error(f"SQL执行失败，处理完成: {result.get('error_message', '')}")
-            return {
-                **updated_state,
-                "step": "failed", 
-                "error_message": result["error_message"],
-                "is_completed": True
-            }
-        
-    except Exception as e:
-        logger.error(f"SqlAgent处理失败: {e}")
-        return {
-            **state,
-            "step": "error",
-            "error_message": f"SqlAgent错误: {e}",
-            "is_completed": True
-        }
-
-# ===== 辅助节点函数 =====
-
-def result_handler_node(state: SystemState) -> Dict[str, Any]:
-    """结果处理节点"""
-    logger.info("处理最终结果")
+def create_thread_workspace(thread_id: str, base_temp_dir: Path) -> Path:
+    """
+    为线程创建独立的临时工作目录
     
-    return {
-        **state,
-        "step": "completed",
-        "is_completed": True
-    }
+    Args:
+        thread_id: 线程ID
+        base_temp_dir: 基础临时目录
+        
+    Returns:
+        线程工作目录路径
+    """
+    thread_dir = base_temp_dir / f"thread_{thread_id}"
+    thread_dir.mkdir(parents=True, exist_ok=True)
+    return thread_dir
 
-# ===== 路由函数 =====
+def process_single_query_with_stats(
+    item: Dict,
+    results_dir: Path,
+    base_temp_dir: Path,
+    timeout_seconds: int = 300
+) -> Dict[str, Any]:
+    """
+    处理单个查询并返回详细统计信息
+    
+    Args:
+        item: 查询项
+        results_dir: 结果输出目录
+        base_temp_dir: 基础临时目录
+        timeout_seconds: 超时时间(秒)
+        
+    Returns:
+        包含详细统计信息的字典
+    """
+    thread_id = threading.current_thread().ident
+    instance_id = item.get("instance_id", "unknown")
+    
+    try:
+        # 创建线程独立工作目录
+        thread_workspace = create_thread_workspace(str(thread_id), base_temp_dir)
+        
+        with log_lock:
+            logger.info(f"开始处理查询: {instance_id}")
+        
+        # 提取查询信息
+        instruction = item.get("instruction", "")
+        db_id = item.get("db_id", "")
+        
+        if not instruction or not db_id:
+            raise ValueError(f"查询信息不完整: instruction={bool(instruction)}, db_id={bool(db_id)}")
+        
+        start_time = time.time()
+        
+        try:
+            # 构建Agent系统图
+            graph = build_agent_system()
+            
+            # 初始状态
+            initial_state: SystemState = {
+                "user_query": instruction,
+                "database_id": db_id,
+                "schema_info": {},
+                "generated_sql": "",
+                "execution_result": {},
+                "step": "start",
+                "iteration": 0,
+                "final_sql": "",
+                "final_result": [],
+                "error_message": "",
+                "is_completed": False
+            }
+            
+            # 运行图
+            config = {"configurable": {"thread_id": f"sql_session_{thread_id}"}}
+            result = graph.invoke(initial_state, config)
+            
+            elapsed_time = time.time() - start_time
+            
+            # 检查是否超时
+            if elapsed_time > timeout_seconds:
+                raise TimeoutError(f"SQL生成超时: {elapsed_time:.2f}秒")
+            
+            result['execution_time'] = elapsed_time
+            
+            # 根据新的成功定义：只有返回数据大于0条才算成功
+            has_data = bool(result.get('final_result', [])) and len(result.get('final_result', [])) > 0
+            is_completed = result.get('is_completed', False)
+            success = is_completed and has_data  # 必须完成且有数据才算成功
+            
+            error_msg = result.get('error_message', '')
+            iterations = result.get('iteration', 0)
+            
+            # 更新状态分类逻辑
+            if success:
+                status = 'success_with_data'
+            elif is_completed and not has_data:
+                status = 'completed_no_data'  # 完成但无数据，按新定义算失败
+            else:
+                status = 'failed'
+            
+            # 如果完成但无数据，设置错误信息
+            if is_completed and not has_data and not error_msg:
+                error_msg = "查询完成但未返回数据"
+            
+            # 保存SQL文件
+            sql_file = save_sql_to_file(
+                result=result,
+                instance_id=instance_id,
+                query=instruction,
+                database_id=db_id,
+                results_dir=results_dir
+            )
+            
+            with log_lock:
+                logger.info(f"完成处理查询: {instance_id}, 耗时: {elapsed_time:.2f}秒, 成功: {success}")
+            
+            return {
+                'instance_id': instance_id,
+                'success': success,
+                'error_msg': error_msg if not success else "",
+                'iterations': iterations,
+                'has_data': has_data,
+                'status': status,
+                'elapsed_time': elapsed_time,
+                'final_sql': result.get('final_sql', ''),
+                'final_result': result.get('final_result', [])
+            }
+            
+        except Exception as graph_error:
+            error_msg = f"图执行失败: {graph_error}"
+            with log_lock:
+                logger.error(f"查询 {instance_id} {error_msg}")
+            return {
+                'instance_id': instance_id,
+                'success': False,
+                'error_msg': error_msg,
+                'iterations': 0,
+                'has_data': False,
+                'status': 'failed',
+                'elapsed_time': time.time() - start_time,
+                'final_sql': '',
+                'final_result': []
+            }
+        
+    except TimeoutError as e:
+        error_msg = f"超时错误: {str(e)}"
+        with log_lock:
+            logger.error(f"查询 {instance_id} 处理超时: {error_msg}")
+        return {
+            'instance_id': instance_id,
+            'success': False,
+            'error_msg': error_msg,
+            'iterations': 0,
+            'has_data': False,
+            'status': 'failed',
+            'elapsed_time': timeout_seconds
+        }
+        
+    except Exception as e:
+        error_msg = f"处理错误: {str(e)}"
+        with log_lock:
+            logger.error(f"查询 {instance_id} 处理失败: {error_msg}")
+        return {
+            'instance_id': instance_id,
+            'success': False,
+            'error_msg': error_msg,
+            'iterations': 0,
+            'has_data': False,
+            'status': 'failed',
+            'elapsed_time': 0
+        }
+    
+    finally:
+        # 清理线程工作目录
+        try:
+            if 'thread_workspace' in locals() and thread_workspace.exists():
+                shutil.rmtree(thread_workspace)
+        except Exception as e:
+            with log_lock:
+                logger.warning(f"清理线程工作目录失败: {e}")
 
-def route_completion(state: SystemState) -> str:
-    """路由到完成状态"""
-    if state["is_completed"]:
-        return "end"
-    return "continue"
+# ===== Agent节点函数已移动到BuildAgentSystem.py中 =====
 
 
 
@@ -152,288 +237,406 @@ def setup_logging() -> None:
         ]
     )
 
-def save_results_to_csv(results: list, filename: str) -> str:
+def save_sql_to_file(
+    result: Dict[str, Any], 
+    instance_id: str, 
+    query: str, 
+    database_id: str, 
+    results_dir: Path
+) -> str:
     """
-    将结果保存到CSV文件
+    将SQL查询结果保存到文件
     
     Args:
-        results: 查询结果列表
-        filename: 文件名
+        result: 系统执行结果
+        instance_id: 查询实例ID
+        query: 原始查询
+        database_id: 数据库ID
+        results_dir: 结果保存目录
         
     Returns:
         保存的文件路径
     """
-    if not results:
-        return ""
-    
-    # 生成带时间戳的文件名
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_filename = f"{filename}_{timestamp}.csv"
-    
     try:
-        with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
-            if results:
-                fieldnames = results[0].keys()
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(results)
+        output_file = results_dir / f"{instance_id}.sql"
         
-        return csv_filename
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write(f"-- Instance ID: {instance_id}\n")
+            f.write(f"-- Query: {query}\n")
+            f.write(f"-- Database: {database_id}\n")
+            f.write(f"-- Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"-- Execution time: {result.get('execution_time', 0):.2f}s\n")
+            f.write(f"-- Success: {result.get('success', False)} (成功定义：返回数据>0条)\n")
+            f.write(f"-- Iterations: {result.get('iterations', 0)}\n")
+            
+            if result.get('error_message'):
+                f.write(f"-- Error: {result['error_message']}\n")
+            
+            f.write("\n")
+            f.write(result.get('final_sql', '-- No SQL generated'))
+        
+        return str(output_file)
+        
     except Exception as e:
-        logging.error(f"保存CSV文件失败: {e}")
+        logger.error(f"保存SQL文件失败 {instance_id}: {e}")
         return ""
 
-def print_results_summary(result: Dict[str, Any]) -> None:
+def load_queries(input_file: Path) -> List[Dict]:
     """
-    打印结果摘要 - 安全版本
+    加载查询数据
     
     Args:
-        result: 系统执行结果
-    """
-    print("\n" + "="*80)
-    print("SQL生成系统执行结果")
-    print("="*80)
-    
-    # 安全访问 success 和 iterations
-    success = result.get('success', False)
-    iterations = result.get('iterations', 0)
-    execution_time = result.get('execution_time', 0)
-    
-    print(f"执行状态: {'成功' if success else '失败'}")
-    print(f"迭代次数: {iterations}")
-    print(f"执行时间: {execution_time:.2f}秒")
-    
-    # 显示SQL
-    final_sql = result.get('final_sql', '')
-    if final_sql:
-        print(f"\n最终SQL语句:")
-        print("-" * 40)
-        print(final_sql)
-        print("-" * 40)
-    
-    # 显示查询结果
-    final_result = result.get('final_result', [])
-    if final_result:
-        result_count = len(final_result)
-        print(f"\n查询结果: {result_count} 行数据")
-        
-        if result_count > 0:
-            print("\n前3行数据预览:")
-            print("-" * 40)
-            for i, row in enumerate(final_result[:3], 1):
-                print(f"行 {i}: {row}")
-            
-            if result_count > 3:
-                print(f"... 还有 {result_count - 3} 行数据")
-    
-    # 显示错误信息
-    error_message = result.get('error_message', result.get('error', ''))
-    if error_message:
-        print(f"\n错误信息: {error_message}")
-    
-    # 显示CSV文件路径
-    csv_file = result.get('csv_file', '')
-    if csv_file:
-        print(f"\nCSV文件: {csv_file}")
-    
-    print("="*80)
-
-def run(
-    query: str,
-    database_id: str,
-    additional_info: str = "",
-    save_to_csv: bool = True
-) -> Dict[str, Any]:
-    """
-    运行SQL生成系统的主函数
-    
-    Args:
-        query: 用户查询
-        database_id: 数据库ID
-        additional_info: 额外信息
-        save_to_csv: 是否保存结果到CSV
+        input_file: 输入文件路径
         
     Returns:
-        执行结果字典
+        查询列表
     """
+    queries = []
+    
     try:
-        logger.info("初始化SQL生成系统...")
+        with jsonlines.open(input_file) as reader:
+            for item in reader:
+                queries.append(item)
         
-        # 创建图
-        workflow = StateGraph(SystemState)
-        
-        # 添加节点
-        workflow.add_node("info_agent_node", info_agent_node)  
-        workflow.add_node("sql_agent_node", sql_agent_node)
-        workflow.add_node("result_handler_node", result_handler_node)
-        
-        # 将入口点设置为 info_agent_node
-        workflow.set_entry_point("info_agent_node")
-        
-        # 添加条件边
-        workflow.add_conditional_edges(
-            "result_handler_node",
-            route_completion,
-            {
-                "end": END,
-                "continue": "info_agent_node"  # 理论上不会到达
-            }
-        )
-        
-        # 编译图
-        graph = workflow.compile()
-        
-        
-        # 初始状态
-        initial_state: SystemState = {
-            "user_query": query,
-            "database_id": database_id,
-            "schema_info": {},
-            "generated_sql": "",
-            "execution_result": {},
-            "step": "start",
-            "iteration": 0,
-            "final_sql": "",
-            "final_result": [],
-            "error_message": "",
-            "is_completed": False
-        }
-        
-        logger.info(f"开始处理查询: {query}")
-        start_time = time.time()
-        
-        # 设置最大执行时间（5分钟）
-        max_execution_time = 300  
-        
-        try:
-            # 运行图
-            config = {"configurable": {"thread_id": "sql_session"}}
-            result = graph.invoke(initial_state, config)
-            
-            execution_time = time.time() - start_time
-            
-            # 检查是否超时
-            if execution_time > max_execution_time:
-                logger.warning(f"系统执行超时 ({execution_time:.1f}s > {max_execution_time}s)")
-                return {
-                    'success': False,
-                    'error': f'系统执行超时 ({execution_time:.1f}秒)',
-                    'final_sql': result.get('final_sql', ''),
-                    'final_result': [],
-                    'iterations': result.get('iteration', 0),
-                    'execution_time': execution_time
-                }
-            
-            result['execution_time'] = execution_time
-            
-        except Exception as graph_error:
-            execution_time = time.time() - start_time
-            logger.error(f"图执行失败: {graph_error}")
-            return {
-                'success': False,
-                'error': f'图执行失败: {graph_error}',
-                'final_sql': '',
-                'final_result': [],
-                'iterations': 0,
-                'execution_time': execution_time
-            }
-        
-        logger.info(f"系统执行完成，耗时: {execution_time:.2f}秒")
-        
-        # 将 langgraph 的结果转换为标准格式
-        # 更宽松的成功判断：只要系统完成执行就算成功，即使有SQL错误
-        final_result = {
-            'success': result.get('is_completed', False),  # 移除严格的错误检查
-            'final_sql': result.get('final_sql', result.get('generated_sql', '')),
-            'final_result': result.get('final_result', []),
-            'iterations': result.get('iteration', 0),
-            'execution_time': execution_time,
-            'error_message': result.get('error_message', ''),
-            'database_id': database_id,
-            'user_query': query
-        }
-        
-        # 保存结果到CSV
-        csv_file = ""
-        if save_to_csv and final_result.get('final_result'):
-            csv_file = save_results_to_csv(
-                final_result['final_result'],
-                f"sql_result_{database_id}"
-            )
-            if csv_file:
-                logger.info(f"结果已保存到: {csv_file}")
-                final_result['csv_file'] = csv_file
-        
-        return final_result
+        logger.info(f"成功加载 {len(queries)} 个查询")
+        return queries
         
     except Exception as e:
-        logger.error(f"系统执行失败: {e}")
-        return {
-            'success': False,
-            'error': str(e),
-            'final_sql': '',
-            'final_result': [],
-            'iterations': 0,
-            'execution_time': 0
-        }
+        logger.error(f"加载查询文件失败 {input_file}: {e}")
+        return []
+
+def create_timestamped_directory(base_path: Path, prefix: str = "results") -> Path:
+    """
+    创建带时间戳的目录
+    
+    Args:
+        base_path: 基础路径
+        prefix: 目录前缀
+        
+    Returns:
+        创建的目录路径
+    """
+    # 生成短时间戳 (格式: YYYYMMDD_HHMMSS)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    results_dir = base_path / f"{prefix}_{timestamp}"
+    results_dir.mkdir(exist_ok=True)
+    
+    logger.info(f"创建结果目录: {results_dir}")
+    return results_dir
+
+def process_batch_queries(queries: List[Dict], results_dir: Path, max_workers: int = None, timeout_seconds: int = 300) -> Dict[str, Any]:
+    """
+    批量处理查询
+    
+    Args:
+        queries: 查询列表
+        results_dir: 结果保存目录
+        max_workers: 最大并发线程数
+        timeout_seconds: 单个查询超时时间
+        
+    Returns:
+        处理结果摘要
+    """
+    total_queries = len(queries)
+    success_count = 0  # 成功：有数据返回
+    failed_count = 0   # 失败：无数据返回或执行失败
+    completed_no_data_count = 0  # 完成但无数据的数量（算作失败，但单独统计）
+    total_iterations = 0
+    failed_items = []
+    instance_results = []  # 记录每个instance的结果
+    
+    logger.info(f"开始并发处理 {total_queries} 个查询...")
+    logger.info(f"成功定义：在规定次数内生成出可以查询到大于一条数据的结果")
+    
+    # 确保结果目录存在
+    results_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 创建基础临时目录
+    base_temp_dir = Path(tempfile.mkdtemp(prefix="sql_gen_batch_"))
+    
+    try:
+        # 使用ThreadPoolExecutor进行并发处理
+        if max_workers is None:
+            max_workers = min(32, (os.cpu_count() or 1) + 4)
+        
+        # 初始化连接池
+        if HAS_CONNECTION_POOL:
+            try:
+                pool = get_global_pool(max_connections=max_workers)
+                logger.info(f"连接池已初始化: max_connections={max_workers}")
+            except Exception as e:
+                logger.warning(f"连接池初始化失败，将使用原始连接方式: {e}")
+            
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # 提交所有任务
+            future_to_query = {
+                executor.submit(
+                    process_single_query_with_stats,  # 使用新的函数
+                    item,
+                    results_dir,
+                    base_temp_dir,
+                    timeout_seconds
+                ): item for item in queries
+            }
+            
+            # 使用as_completed异步收集结果
+            with tqdm(total=len(queries), desc="处理进度") as pbar:
+                for future in as_completed(future_to_query):
+                    item = future_to_query[future]
+                    
+                    try:
+                        result_data = future.result()
+                        instance_id = result_data['instance_id']
+                        success = result_data['success']
+                        error_msg = result_data['error_msg']
+                        iterations = result_data['iterations']
+                        has_data = result_data['has_data']
+                        status = result_data['status']
+                        
+                        # 记录instance结果
+                        instance_result = {
+                            "instance_id": instance_id,
+                            "status": status,
+                            "iterations": iterations,
+                            "has_data": has_data
+                        }
+                        instance_results.append(instance_result)
+                        
+                        if success:
+                            success_count += 1
+                            total_iterations += iterations
+                        else:
+                            failed_count += 1
+                            # 如果是完成但无数据的情况，单独统计
+                            if status == 'completed_no_data':
+                                completed_no_data_count += 1
+                            
+                            failed_items.append({
+                                "instance_id": instance_id,
+                                "error": error_msg,
+                                "item": item
+                            })
+                        
+                        pbar.update(1)
+                        pbar.set_postfix({
+                            "成功": success_count,
+                            "失败": failed_count,
+                            "平均轮数": f"{total_iterations/(success_count) if success_count > 0 else 0:.1f}"
+                        })
+                        
+                    except Exception as e:
+                        failed_count += 1
+                        instance_id = item.get("instance_id", "unknown")
+                        failed_items.append({
+                            "instance_id": instance_id,
+                            "error": f"Future执行异常: {str(e)}",
+                            "item": item
+                        })
+                        
+                        # 记录失败的instance结果
+                        instance_results.append({
+                            "instance_id": instance_id,
+                            "status": "failed",
+                            "iterations": 0,
+                            "has_data": False
+                        })
+                        
+                        pbar.update(1)
+                        pbar.set_postfix({
+                            "成功": success_count,
+                            "失败": failed_count,
+                            "平均轮数": f"{total_iterations/(success_count) if success_count > 0 else 0:.1f}"
+                        })
+    
+    finally:
+        # 清理临时目录
+        try:
+            if base_temp_dir.exists():
+                shutil.rmtree(base_temp_dir)
+                logger.info("批量处理临时目录已清理")
+        except Exception as e:
+            logger.warning(f"清理批量处理临时目录失败: {e}")
+        
+        # 输出连接池统计信息
+        if HAS_CONNECTION_POOL:
+            try:
+                stats = get_pool_stats()
+                logger.info(f"连接池统计信息: {stats}")
+            except Exception as e:
+                logger.warning(f"获取连接池统计信息失败: {e}")
+    
+    # 保存失败记录
+    if failed_items:
+        failed_report_file = results_dir / "failed_queries.json"
+        with open(failed_report_file, 'w', encoding='utf-8') as f:
+            json.dump(failed_items, f, ensure_ascii=False, indent=2)
+        logger.info(f"失败记录已保存到: {failed_report_file}")
+    
+    # 保存每个instance的结果
+    instance_results_file = results_dir / "instance_results.json"
+    with open(instance_results_file, 'w', encoding='utf-8') as f:
+        json.dump(instance_results, f, ensure_ascii=False, indent=2)
+    logger.info(f"Instance结果已保存到: {instance_results_file}")
+    
+    # 生成汇总报告
+    avg_iterations = total_iterations / success_count if success_count > 0 else 0
+    
+    summary_report = {
+        "total_queries": total_queries,
+        "successful": success_count,
+        "failed": failed_count,
+        "success_rate": f"{success_count/total_queries*100:.2f}%" if total_queries > 0 else "0%",
+        "average_iterations": f"{avg_iterations:.2f}",
+        "completed_no_data_count": completed_no_data_count,
+        "success_definition": "成功定义：在规定次数内生成出可以查询到大于一条数据的结果",
+        "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        "results_directory": str(results_dir)
+    }
+    
+    summary_file = results_dir / "summary_report.json"
+    with open(summary_file, 'w', encoding='utf-8') as f:
+        json.dump(summary_report, f, ensure_ascii=False, indent=2)
+    
+    logger.info(f"汇总报告已保存到: {summary_file}")
+    
+    return summary_report
 
 def main():
-    """主函数"""
+    """主函数 - 批量处理模式"""
     # 设置日志
     setup_logging()
     logger = logging.getLogger(__name__)
     
-    logger.info("启动SQL生成系统")
+    logger.info("启动SQL生成系统 - 批量处理模式")
     
     # 解析命令行参数
-    parser = argparse.ArgumentParser(description='SQL生成系统')
-    parser.add_argument('--query', '-q',default="I want to compute and compare the cumulative count of Ethereum smart contracts created by users versus created by other contracts. Please list out the daily cumulative tallies between 2017 and 2021.", type=str, help='用户查询语句')
-    parser.add_argument('--database', '-d', type=str, default='CRYPTO', help='数据库ID (默认: CRYPTO)')
-    parser.add_argument('--additional-info', '-a', type=str, default='', help='额外信息')
-    parser.add_argument('--no-csv', action='store_true', help='不保存结果到CSV文件')
+    parser = argparse.ArgumentParser(description='SQL生成系统 - 批量处理模式')
+    parser.add_argument('--input-file', '-i', type=str, default='spider2-snow-instances-nodata.jsonl', help='输入文件路径')
+    parser.add_argument('--max-workers', type=int, default=min(16, (os.cpu_count() or 1) + 4), help='最大工作线程数')
+    parser.add_argument('--timeout', type=int, default=300, help='单个查询超时时间(秒)')
     
     args = parser.parse_args()
     
     try:
-        print("SQL生成系统 - 自定义查询模式")
+        # 获取当前目录
+        current_dir = Path(__file__).parent
+        
+        print("SQL生成系统 - 批量处理模式")
         print("="*50)
-        print(f"查询: {args.query}")
-        print(f"数据库: {args.database}")
-        if args.additional_info:
-            print(f"额外信息: {args.additional_info}")
-        print("\n开始执行...")
         
-        result = run(
-            query=args.query,
-            database_id=args.database,
-            additional_info=args.additional_info,
-            save_to_csv=not args.no_csv
-        )
+        # 检查输入文件
+        input_file = current_dir / args.input_file
+        if not input_file.exists():
+            logger.error(f"输入文件不存在: {input_file}")
+            print(f"错误: 输入文件不存在: {input_file}")
+            sys.exit(1)
         
-        print_results_summary(result)
+        # 加载查询数据
+        queries = load_queries(input_file)
+        if not queries:
+            logger.error("没有找到查询数据，程序退出")
+            print("错误: 没有找到查询数据")
+            sys.exit(1)
         
-        # 输出最终状态 - 安全版本
-        success = result.get('success', False)
-        iterations = result.get('iterations', 0)
-        error_message = result.get('error_message', result.get('error', ''))
+        print(f"加载了 {len(queries)} 个查询")
+        print(f"输入文件: {input_file}")
         
-        if success:
-            logger.info("系统执行成功完成")
-            print(f"\n✅ 系统执行成功，共迭代 {iterations} 次")
-        else:
-            logger.error("系统执行失败")
-            print(f"\n❌ 系统执行失败: {error_message or '未知错误'}")
-            # 不要强制退出，让用户看到完整的错误信息
-            # sys.exit(1)
-            
+        # 创建结果目录
+        results_dir = create_timestamped_directory(current_dir, "batch_results")
+        print(f"结果将保存到: {results_dir}")
+        print("\n开始批量处理...")
+        
+        # 使用process_batch_queries函数
+        start_time = time.time()
+        summary_report = process_batch_queries(queries, results_dir, args.max_workers, args.timeout)
+        total_time = time.time() - start_time
+        
+        # 更新汇总报告添加时间信息
+        summary_report.update({
+            "max_workers": args.max_workers,
+            "timeout_seconds": args.timeout,
+            "total_time": f"{total_time:.2f}秒",
+            "avg_time_per_query": f"{total_time/len(queries):.2f}秒"
+        })
+        
+        # 重新保存更新后的汇总报告
+        summary_file = results_dir / "summary_report.json"
+        with open(summary_file, 'w', encoding='utf-8') as f:
+            json.dump(summary_report, f, ensure_ascii=False, indent=2)
+        
+        # 显示处理结果
+        print("\n" + "="*60)
+        print("批量处理完成！")
+        print("="*60)
+        print(f"📊 处理结果")
+        print("-" * 60)
+        print(f"总查询数: {summary_report['total_queries']}")
+        print(f"成功处理: {summary_report['successful']} (有数据返回)")
+        print(f"处理失败: {summary_report['failed']} (无数据返回或执行失败)")
+        print(f"成功率: {summary_report['success_rate']}")
+        print(f"平均修复轮数: {summary_report['average_iterations']}")
+        print(f"完成但无数据: {summary_report['completed_no_data_count']}")
+        print(f"总耗时: {summary_report.get('total_time', '未知')}")
+        print(f"平均每个查询: {summary_report.get('avg_time_per_query', '未知')}")
+        print(f"并发线程数: {args.max_workers}")
+        print(f"结果目录: {results_dir}")
+        print("="*60)
+        
+        if summary_report['failed'] > 0:
+            print(f"\n⚠️  有 {summary_report['failed']} 个查询处理失败，详细信息请查看 failed_queries.json")
+        
+        print(f"\n📊 详细统计信息已保存到 instance_results.json")
+        
+        # 显示连接池统计信息
+        if HAS_CONNECTION_POOL:
+            try:
+                stats = get_pool_stats()
+                print(f"\n🔗 连接池统计信息:")
+                print(f"  总创建连接数: {stats.get('total_created', 0)}")
+                print(f"  总销毁连接数: {stats.get('total_destroyed', 0)}")
+                print(f"  总借用连接数: {stats.get('total_borrowed', 0)}")
+                print(f"  总归还连接数: {stats.get('total_returned', 0)}")
+                print(f"  总重试次数: {stats.get('total_retries', 0)}")
+                print(f"  当前连接池大小: {stats.get('pool_size', 0)}")
+                print(f"  当前活跃连接数: {stats.get('current_active', 0)}")
+            except Exception as e:
+                print(f"⚠️  获取连接池统计信息失败: {e}")
+        
     except KeyboardInterrupt:
         logger.info("程序被用户中断")
         print("\n\n程序被用户中断")
+        
+        # 清理连接池
+        if HAS_CONNECTION_POOL:
+            try:
+                close_global_pool()
+                logger.info("连接池已关闭")
+            except Exception as e:
+                logger.warning(f"关闭连接池失败: {e}")
+        
         sys.exit(0)
     except Exception as e:
         logger.error(f"主程序执行错误: {e}")
         print(f"发生错误: {e}")
+        
+        # 清理连接池
+        if HAS_CONNECTION_POOL:
+            try:
+                close_global_pool()
+                logger.info("连接池已关闭")
+            except Exception as e:
+                logger.warning(f"关闭连接池失败: {e}")
+        
         sys.exit(1)
+    
+    finally:
+        # 确保连接池被正确关闭
+        if HAS_CONNECTION_POOL:
+            try:
+                close_global_pool()
+                logger.info("连接池已关闭")
+            except Exception as e:
+                logger.warning(f"关闭连接池失败: {e}")
 
 if __name__ == "__main__":
     main()

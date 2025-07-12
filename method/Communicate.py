@@ -10,10 +10,17 @@ from langgraph.graph.message import add_messages
 
 # ===== 数据库摘要树结构定义 =====
 
+class FieldSummary(TypedDict):
+    """单个字段的详细信息，包含名称、类型、描述和字段ID"""
+    name: str
+    type: str
+    description: str
+    field_id: str
+
 class TableSummary(TypedDict):
-    """单个表的摘要，包含表名和字段列表"""
+    """单个表的摘要，包含表名和字段详细信息列表"""
     table: str
-    fields: List[str]
+    fields: List[FieldSummary]
 
 class SchemaSummary(TypedDict):
     """单个schema的摘要，包含schema名和其下的表摘要列表"""

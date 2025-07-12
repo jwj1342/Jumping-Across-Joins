@@ -1,5 +1,6 @@
 """
 Snowflake数据库连接模块
+支持连接池和重试机制
 
 """
 
@@ -9,9 +10,16 @@ from typing import Optional, Dict, Any, List
 import logging
 from dotenv import load_dotenv
 
+# 导入连接池模块
+try:
+    from utils.SnowflakeConnectionPool import snowflake_sql_query_with_pool, get_pool_stats, close_global_pool
+    _HAS_POOL = True
+except ImportError:
+    _HAS_POOL = False
+
 
 def snowflake_sql_query(
-    sql_query: str, database_id: str, timeout: int = 30, log: bool = False
+    sql_query: str, database_id: str, timeout: int = 30, log: bool = False, use_pool: bool = True
 ) -> List[Dict[str, Any]]:
     """
     执行Snowflake SQL查询并返回结果
@@ -21,6 +29,7 @@ def snowflake_sql_query(
         database_id (str): 数据库标识符
         timeout (int): 连接超时时间，默认30秒
         log (bool): 是否输出SQL查询语句日志，默认为False
+        use_pool (bool): 是否使用连接池，默认为True
 
     返回:
         List[Dict[str, Any]]: 查询结果，每行数据作为字典返回
@@ -35,6 +44,20 @@ def snowflake_sql_query(
 
     if not database_id or not database_id.strip():
         raise ValueError("数据库ID不能为空")
+    
+    # 如果可以使用连接池且启用了连接池，则使用连接池
+    if _HAS_POOL and use_pool:
+        try:
+            return snowflake_sql_query_with_pool(
+                sql_query=sql_query,
+                database_id=database_id,
+                timeout=timeout,
+                log=log
+            )
+        except Exception as e:
+            # 如果连接池失败，回退到原始连接方式
+            logging.warning(f"连接池查询失败，回退到原始连接: {e}")
+            pass  # 继续执行原始连接逻辑
 
     # 加载环境变量
     load_dotenv(".env")
