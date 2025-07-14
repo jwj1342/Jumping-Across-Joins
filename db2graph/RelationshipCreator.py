@@ -40,54 +40,73 @@ class RelationshipCreator:
         return success
     
     def create_has_table_relationship(self, schema_name: str, table_name: str, db_name: str) -> bool:
-        """创建模式拥有表的关系"""
+        """创建模式拥有表的关系（包含数据库级别匹配）"""
+        # 去掉表名中的模式前缀
+        if '.' in table_name:
+            table_name = table_name.split('.')[-1]
+            
         cypher = templates.create_relationship.format(
             label1="Schema",
             match1=f"name: '{schema_name}', database: '{db_name}'",
             label2="Table",
-            match2=f"name: '{table_name}', schema: '{schema_name}'",
+            match2=f"name: '{table_name}', database: '{db_name}', schema: '{schema_name}'",
             rel_type="HAS_TABLE",
             rel_properties="type: 'has_table'"
         )
         success, result = self.executor.execute_transactional_cypher(cypher)
         return success
     
-    def create_uses_field_group_relationship(self, table_name: str, group_name: str, schema: str) -> bool:
-        """创建表使用字段组的关系"""
-        cypher = templates.create_relationship.format(
-            label1="Table",
-            match1=f"name: '{table_name}', schema: '{schema}'",
-            label2="SharedFieldGroup",
-            match2=f"name: '{group_name}', schema: '{schema}'",
-            rel_type="USES_FIELD_GROUP",
-            rel_properties="type: 'uses_field_group'"
-        )
+    def create_uses_field_group_relationship(self, table_name: str, field_hash: str, schema: str, database: str = None) -> bool:
+        """创建表使用字段组的关系（包含数据库级别匹配）"""
+        # 去掉表名中的模式前缀
+        if '.' in table_name:
+            table_name = table_name.split('.')[-1]
+        
+        # 如果没有提供数据库参数，使用原来的匹配方式（向后兼容）
+        if database:
+            cypher = templates.create_relationship.format(
+                label1="Table",
+                match1=f"name: '{table_name}', database: '{database}', schema: '{schema}'",
+                label2="SharedFieldGroup",
+                match2=f"id: '{field_hash}', database: '{database}', schema: '{schema}'",
+                rel_type="USES_FIELD_GROUP",
+                rel_properties="type: 'uses_field_group'"
+            )
+        else:
+            cypher = templates.create_relationship.format(
+                label1="Table",
+                match1=f"name: '{table_name}', schema: '{schema}'",
+                label2="SharedFieldGroup",
+                match2=f"id: '{field_hash}', schema: '{schema}'",
+                rel_type="USES_FIELD_GROUP",
+                rel_properties="type: 'uses_field_group'"
+            )
         success, result = self.executor.execute_transactional_cypher(cypher)
         return success
     
-    def create_group_has_field_relationship(self, group_name: str, field_name: str, schema: str) -> bool:
-        """创建字段组拥有字段的关系（确保字段组和字段的精确匹配）"""
+    def create_group_has_field_relationship(self, field_hash: str, field_name: str, schema: str, database: str) -> bool:
+        """创建字段组拥有字段的关系（确保字段组和字段的精确匹配，包含数据库级别匹配）"""
         try:
             # 转义特殊字符
-            escaped_group_name = self._escape_string(group_name)
             escaped_field_name = self._escape_string(field_name)
             escaped_schema = self._escape_string(schema)
+            escaped_database = self._escape_string(database)
             
-            # 确保只匹配属于该字段组的字段节点
+            # 确保只匹配属于该字段组的字段节点（包含数据库维度）
             cypher = templates.create_relationship.format(
                 label1="SharedFieldGroup",
-                match1=f"name: '{escaped_group_name}', schema: '{escaped_schema}'",
+                match1=f"id: '{field_hash}', database: '{escaped_database}', schema: '{escaped_schema}'",
                 label2="Field",
-                match2=f"name: '{escaped_field_name}', schema: '{escaped_schema}', field_group: '{escaped_group_name}', node_type: 'shared_field'",
+                match2=f"name: '{escaped_field_name}', database: '{escaped_database}', schema: '{escaped_schema}', field_group_id: '{field_hash}', node_type: 'shared_field'",
                 rel_type="HAS_FIELD",
                 rel_properties="type: 'has_field'"
             )
             success, result = self.executor.execute_transactional_cypher(cypher)
             if not success:
-                logger.error(f"RelationshipCreator: HAS_FIELD关系创建失败: {group_name} -> {field_name}")
+                logger.error(f"RelationshipCreator: HAS_FIELD关系创建失败: {field_hash[:8]}... -> {field_name} (数据库: {database})")
             return success
         except Exception as e:
-            logger.error(f"RelationshipCreator: HAS_FIELD关系创建异常: {group_name} -> {field_name} - {str(e)}")
+            logger.error(f"RelationshipCreator: HAS_FIELD关系创建异常: {field_hash[:8]}... -> {field_name} (数据库: {database}) - {str(e)}")
             return False
     
     def _escape_string(self, text: str) -> str:
@@ -130,21 +149,45 @@ class RelationshipCreator:
         
         return cleaned_text
     
-    def create_table_has_field_relationship(self, table_name: str, field_name: str, schema: str, field_key: str) -> bool:
-        """创建表直接拥有字段的关系（用于独有字段）"""
+    def create_table_has_field_relationship(self, table_name: str, field_name: str, schema: str, field_key: str, database: str = None) -> bool:
+        """创建表直接拥有字段的关系（用于独有字段，包含数据库级别匹配）"""
+        # 去掉表名中的模式前缀
+        if '.' in table_name:
+            table_name = table_name.split('.')[-1]
+        
+        # 从field_key中提取数据库信息（如果没有提供database参数）
+        if not database and field_key:
+            # field_key格式: db_name.schema_name.table_name.col_name:col_type:unique
+            try:
+                database = field_key.split('.')[0]
+            except:
+                logger.warning(f"RelationshipCreator: 无法从field_key提取数据库信息: {field_key}")
+        
         # 使用表名进行精确匹配，确保只连接到属于该表的独有字段节点
-        # 通过table属性确保字段与表的精确对应关系
-        cypher = templates.create_relationship.format(
-            label1="Table",
-            match1=f"name: '{table_name}', schema: '{schema}'",
-            label2="Field",
-            match2=f"name: '{field_name}', schema: '{schema}', table: '{table_name}', node_type: 'unique_field'",
-            rel_type="HAS_UNIQUE_FIELD",
-            rel_properties="type: 'has_unique_field'"
-        )
+        # 通过database, schema, table属性确保字段与表的精确对应关系
+        if database:
+            cypher = templates.create_relationship.format(
+                label1="Table",
+                match1=f"name: '{table_name}', database: '{database}', schema: '{schema}'",
+                label2="Field",
+                match2=f"name: '{field_name}', database: '{database}', schema: '{schema}', table: '{table_name}', node_type: 'unique_field'",
+                rel_type="HAS_UNIQUE_FIELD",
+                rel_properties="type: 'has_unique_field'"
+            )
+        else:
+            # 向后兼容，如果没有数据库信息
+            cypher = templates.create_relationship.format(
+                label1="Table",
+                match1=f"name: '{table_name}', schema: '{schema}'",
+                label2="Field",
+                match2=f"name: '{field_name}', schema: '{schema}', table: '{table_name}', node_type: 'unique_field'",
+                rel_type="HAS_UNIQUE_FIELD",
+                rel_properties="type: 'has_unique_field'"
+            )
+        
         success, result = self.executor.execute_transactional_cypher(cypher)
         if success:
-            logger.debug(f"RelationshipCreator: 创建表-字段关系: {table_name} -> {field_name}")
+            logger.debug(f"RelationshipCreator: 创建表-字段关系: {table_name} -> {field_name} (数据库: {database})")
         else:
-            logger.error(f"RelationshipCreator: 创建表-字段关系失败: {table_name} -> {field_name}")
+            logger.error(f"RelationshipCreator: 创建表-字段关系失败: {table_name} -> {field_name} (数据库: {database})")
         return success 

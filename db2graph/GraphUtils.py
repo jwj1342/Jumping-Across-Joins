@@ -158,164 +158,105 @@ class GraphUtils:
 
 
 class FieldGroupOptimizer:
-    """字段组优化器，用于创建最小不重叠字段组集合"""
+    """字段组优化器 - 使用精确匹配策略"""
     
     def __init__(self):
         self.logger = logging.getLogger(__name__)
     
-    def optimize_field_groups_with_exact_matching(self, field_groups_data: Dict[str, List]) -> Dict[str, Dict]:
+    def optimize_field_groups_with_exact_matching(self, field_groups: Dict[str, List]) -> Dict[str, Dict]:
         """
-        优化字段组并确保精确匹配（最小子集解决方案）
+        优化字段组，确保没有重叠，每个表只属于一个字段组
+        使用贪心策略：优先保留共享表最多的字段组
+        
         Args:
-            field_groups_data: {field_hash: [(table_info, schema_name, json_file), ...]}
+            field_groups: {field_hash: [(table_info, schema_name, json_file), ...]}
         Returns:
-            optimized_groups: {field_hash: group_info}
+            优化后的字段组信息
         """
-        self.logger.info("开始优化字段组，使用精确字段集合匹配...")
+        self.logger.info("开始字段组优化（精确匹配模式）...")
         
-        # 第一步：分析所有字段组合并按模式分组
-        schema_combinations = self._analyze_combinations_by_schema(field_groups_data)
-        
-        # 第二步：为每个模式选择最小覆盖字段组集合
-        optimal_groups = {}
-        for schema_name, combinations in schema_combinations.items():
-            schema_optimal = self._select_minimal_covering_set(schema_name, combinations)
-            optimal_groups.update(schema_optimal)
-        
-        # 第三步：验证精确匹配
-        self._validate_exact_matching(optimal_groups, field_groups_data)
-        
-        return optimal_groups
-    
-    def _analyze_combinations_by_schema(self, field_groups_data: Dict[str, List]) -> Dict[str, List[Dict]]:
-        """按模式分析字段组合"""
-        schema_combinations = defaultdict(list)
-        
-        for field_hash, tables_with_fields in field_groups_data.items():
-            if len(tables_with_fields) > 1:  # 只处理多表共享的字段组
-                representative_table, representative_schema, _ = tables_with_fields[0]
-                column_names = representative_table.get('column_names', [])
-                column_types = representative_table.get('column_types', [])
+        # 1. 预处理：计算每个字段组的信息
+        group_infos = {}
+        for field_hash, tables in field_groups.items():
+            if len(tables) < 2:  # 跳过只有一个表的组
+                continue
                 
-                if len(column_names) >= 2:  # 只处理多字段组合
-                    # 创建字段集合（字段名:类型）
-                    field_set = set()
-                    for i, name in enumerate(column_names):
-                        col_type = column_types[i] if i < len(column_types) else "UNKNOWN"
-                        field_set.add(f"{name}:{col_type}")
-                    
-                    combination = {
-                        'field_hash': field_hash,
-                        'field_set': field_set,
-                        'field_names': column_names,
-                        'field_types': column_types,
-                        'schema': representative_schema,
-                        'representative_table': representative_table.get('table_name', ''),
-                        'table_count': len(tables_with_fields),
-                        'field_count': len(column_names),
-                        'tables': [info[0].get('table_name', '') for info in tables_with_fields]
-                    }
-                    schema_combinations[representative_schema].append(combination)
-        
-        # 为每个模式按字段数量排序
-        for schema in schema_combinations:
-            schema_combinations[schema].sort(key=lambda x: x['field_count'], reverse=True)
-        
-        return dict(schema_combinations)
-    
-    def _select_minimal_covering_set(self, schema_name: str, combinations: List[Dict]) -> Dict[str, Dict]:
-        """为单个模式选择最小覆盖字段组集合"""
-        self.logger.info(f"为模式 {schema_name} 选择最小覆盖字段组集合...")
-        
-        # 使用贪心算法选择最小覆盖集合
-        selected_groups = {}
-        covered_tables = set()
-        
-        # 按表数量和字段数量排序，优先选择覆盖更多表的字段组
-        combinations.sort(key=lambda x: (x['table_count'], x['field_count']), reverse=True)
-        
-        for combo in combinations:
-            field_hash = combo['field_hash']
-            combo_tables = set(combo['tables'])
+            # 获取字段信息
+            table_info = tables[0][0]  # 使用第一个表的信息作为参考
+            column_names = table_info.get('column_names', [])
+            column_types = table_info.get('column_types', [])
             
-            # 检查是否与已选择的字段组有冲突
-            has_conflict = False
-            for selected_hash, selected_info in selected_groups.items():
-                selected_set = selected_info['field_set']
-                combo_set = combo['field_set']
-                
-                # 如果字段集合有重叠且不完全相同，则有冲突
-                if (len(selected_set.intersection(combo_set)) > 0 and 
-                    selected_set != combo_set):
-                    has_conflict = True
-                    break
+            # 构建字段集合标识
+            field_set = frozenset(f"{name}:{type_}" for name, type_ in zip(column_names, column_types))
             
-            if not has_conflict:
-                # 计算新增覆盖的表数量
-                new_tables = combo_tables - covered_tables
-                if len(new_tables) > 0:  # 只选择能覆盖新表的字段组
-                    selected_groups[field_hash] = {
-                        'field_set': combo['field_set'],
-                        'group_name': self._generate_optimized_group_name(combo),
-                        'schema': combo['schema'],
-                        'column_names': combo['field_names'],
-                        'column_types': combo['field_types'],
-                        'table_count': combo['table_count'],
-                        'field_count': combo['field_count'],
-                        'tables': combo['tables']
-                    }
-                    covered_tables.update(combo_tables)
-                    self.logger.info(f"  ✓ 选择字段组: {field_hash[:8]}... ({combo['field_count']}字段 x {combo['table_count']}表)")
-                    self.logger.info(f"    新增覆盖表: {len(new_tables)} 个")
-                else:
-                    self.logger.info(f"  ✗ 跳过字段组: {field_hash[:8]}... (不覆盖新表)")
-            else:
-                self.logger.info(f"  ✗ 跳过字段组: {field_hash[:8]}... (与已选字段组冲突)")
+            group_infos[field_hash] = {
+                'tables': tables,
+                'table_count': len(tables),
+                'field_count': len(column_names),
+                'field_set': field_set,
+                'column_names': column_names,
+                'column_types': column_types
+            }
         
-        self.logger.info(f"模式 {schema_name} 选择了 {len(selected_groups)} 个字段组，覆盖 {len(covered_tables)} 个表")
-        return selected_groups
+        # 2. 按共享表数量和字段数量排序（优先选择共享表多的，字段多的）
+        sorted_groups = sorted(
+            group_infos.items(),
+            key=lambda x: (x[1]['table_count'], x[1]['field_count']),
+            reverse=True
+        )
+        
+        # 3. 贪心选择不重叠的字段组
+        optimized_groups = {}
+        assigned_tables = set()  # 记录已分配的表
+        
+        for field_hash, group_info in sorted_groups:
+            # 检查这个组的表是否已被分配
+            current_tables = set(table_info['table_name'] for table_info, _, _ in group_info['tables'])
+            if not current_tables & assigned_tables:  # 如果没有重叠的表
+                # 添加到优化后的组
+                optimized_groups[field_hash] = {
+                    'group_name': f"FieldGroup_{field_hash[:8]}",
+                    'schema': group_info['tables'][0][1],  # 使用第一个表的schema
+                    'field_count': group_info['field_count'],
+                    'table_count': group_info['table_count'],
+                    'column_names': group_info['column_names'],
+                    'column_types': group_info['column_types'],
+                    'tables': group_info['tables']
+                }
+                # 记录已分配的表
+                assigned_tables.update(current_tables)
+                
+                self.logger.info(f"添加字段组: {field_hash[:8]}")
+                self.logger.info(f"  - 表数量: {len(current_tables)}")
+                self.logger.info(f"  - 字段数量: {group_info['field_count']}")
+                self.logger.info(f"  - 表: {', '.join(current_tables)}")
+        
+        self.logger.info(f"字段组优化完成，保留 {len(optimized_groups)} 个非重叠字段组")
+        return optimized_groups
     
-    def _validate_exact_matching(self, optimal_groups: Dict[str, Dict], original_data: Dict[str, List]):
-        """验证精确匹配结果"""
-        self.logger.info("验证精确字段集合匹配...")
-        
-        validation_errors = []
-        
-        # 为每个字段组验证其包含的表是否都有完全相同的字段集合
-        for field_hash, group_info in optimal_groups.items():
-            group_field_set = group_info['field_set']
-            tables_in_group = set(group_info['tables'])
+    def _analyze_field_combinations(self, field_groups_data: Dict[str, List]) -> List[Dict]:
+        """分析字段组合（仅用于日志记录和调试）"""
+        combinations = []
+        for field_hash, tables in field_groups_data.items():
+            if len(tables) < 2:  # 跳过单表组合
+                continue
             
-            # 检查原始数据中这个字段组对应的所有表
-            original_tables = original_data.get(field_hash, [])
-            for table_info, schema_name, _ in original_tables:
-                table_name = table_info.get('table_name', '')
-                column_names = table_info.get('column_names', [])
-                column_types = table_info.get('column_types', [])
-                
-                # 构建这个表的字段集合
-                table_field_set = set()
-                for i, name in enumerate(column_names):
-                    col_type = column_types[i] if i < len(column_types) else "UNKNOWN"
-                    table_field_set.add(f"{name}:{col_type}")
-                
-                # 验证字段集合是否完全匹配
-                if table_field_set != group_field_set:
-                    validation_errors.append(
-                        f"表 {table_name} 的字段集合与字段组 {group_info['group_name']} 不完全匹配"
-                    )
-                    self.logger.warning(f"  字段集合不匹配: {table_name}")
-                    self.logger.warning(f"    表字段: {sorted(table_field_set)}")
-                    self.logger.warning(f"    组字段: {sorted(group_field_set)}")
+            table_info = tables[0][0]  # 使用第一个表的信息
+            column_names = table_info.get('column_names', [])
+            column_types = table_info.get('column_types', [])
+            
+            # 构建字段集合
+            field_set = set(f"{name}:{type_}" for name, type_ in zip(column_names, column_types))
+            
+            combinations.append({
+                'field_hash': field_hash,
+                'table_count': len(tables),
+                'field_count': len(column_names),
+                'field_set': field_set,
+                'tables': [t[0]['table_name'] for t in tables]
+            })
         
-        if validation_errors:
-            self.logger.error(f"发现 {len(validation_errors)} 个精确匹配验证错误")
-            for error in validation_errors:
-                self.logger.error(f"  {error}")
-            return False
-        else:
-            self.logger.info("✓ 精确字段集合匹配验证通过")
-            return True
+        return combinations
     
     def optimize_field_groups(self, field_groups_data: Dict[str, List]) -> Dict[str, Dict]:
         """

@@ -61,6 +61,10 @@ class NodeCreator:
         table_name = table_info.get('table_name', '')
         table_fullname = table_info.get('table_fullname', '')
         
+        # 去掉表名中的模式前缀
+        if '.' in table_name:
+            table_name = table_name.split('.')[-1]
+        
         # 暂时不存储DDL以避免转义问题，专注于核心功能
         # 后续可以将DDL存储在单独的节点或关系中
         ddl_summary = f"Table with {len(table_info.get('column_names', []))} columns" if ddl else ""
@@ -80,6 +84,10 @@ class NodeCreator:
                           column_name: str, column_type: str, description: str = "", 
                           sample_data: str = "") -> bool:
         """创建列节点"""
+        # 去掉表名中的模式前缀
+        if '.' in table_name:
+            table_name = table_name.split('.')[-1]
+            
         # 使用统一的转义方法
         escaped_description = self._escape_string(description)
         escaped_sample = self._escape_string(sample_data)
@@ -100,7 +108,7 @@ class NodeCreator:
         """创建共享字段组节点"""
         cypher = templates.create_node.format(
             label="SharedFieldGroup",
-            properties=f"name: '{group_name}', database: '{db_name}', schema: '{schema_name}', field_hash: '{field_hash}', field_count: {field_count}, type: 'shared_field_group'"
+            properties=f"name: '{group_name}', database: '{db_name}', schema: '{schema_name}', field_hash: '{field_hash}', field_count: {field_count}, type: 'shared_field_group', id: '{field_hash}'"
         )
         success, result = self.executor.execute_transactional_cypher(cypher)
         if success:
@@ -110,7 +118,7 @@ class NodeCreator:
         return success
     
     def create_shared_field_node(self, field_name: str, field_type: str, db_name: str, schema_name: str, 
-                         group_name: str, description: str = "", sample_data: str = "") -> bool:
+                         field_hash: str, description: str = "", sample_data: str = "") -> bool:
         """创建共享字段节点（专门用于SharedFieldGroup，包含字段组标识）"""
         try:
             # 使用统一的转义处理
@@ -118,17 +126,16 @@ class NodeCreator:
             escaped_field_type = self._escape_string(field_type)
             escaped_db_name = self._escape_string(db_name)
             escaped_schema_name = self._escape_string(schema_name)
-            escaped_group_name = self._escape_string(group_name)
             escaped_description = self._escape_string(description)
             escaped_sample = self._escape_string(sample_data)
             
             cypher = templates.create_node.format(
                 label="Field",
-                properties=f"name: '{escaped_field_name}', type: '{escaped_field_type}', database: '{escaped_db_name}', schema: '{escaped_schema_name}', field_group: '{escaped_group_name}', description: '{escaped_description}', sample_data: '{escaped_sample}', node_type: 'shared_field'"
+                properties=f"name: '{escaped_field_name}', type: '{escaped_field_type}', database: '{escaped_db_name}', schema: '{escaped_schema_name}', field_group_id: '{field_hash}', description: '{escaped_description}', sample_data: '{escaped_sample}', node_type: 'shared_field'"
             )
             success, result = self.executor.execute_transactional_cypher(cypher)
             if success:
-                logger.debug(f"NodeCreator: 创建共享字段节点: {field_name} ({field_type}) -> {group_name}")
+                logger.debug(f"NodeCreator: 创建共享字段节点: {field_name} ({field_type}) -> {field_hash[:8]}...")
             else:
                 logger.error(f"NodeCreator: 创建共享字段节点失败: {field_name} - Cypher执行失败")
             return success
@@ -190,6 +197,10 @@ class NodeCreator:
     def create_field_node(self, field_name: str, field_type: str, db_name: str, schema_name: str, 
                          table_name: str, description: str = "", sample_data: str = "") -> bool:
         """创建字段节点（独有字段，包含表名以确保唯一性）"""
+        # 去掉表名中的模式前缀
+        if '.' in table_name:
+            table_name = table_name.split('.')[-1]
+            
         # 使用统一的转义方法
         escaped_description = self._escape_string(description)
         escaped_sample = self._escape_string(sample_data)

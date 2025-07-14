@@ -123,6 +123,41 @@ Database Specifications:
 - Field Names: Enclose field names in double quotes, e.g., "field_name".
 - Use standard SQL syntax.
 
+Critical Snowflake SQL Rules:
+
+SYNTAX & SEMANTICS:
+1. ALWAYS wrap table names and column names in double quotes (e.g., "table_name", "column_name") to preserve case sensitivity
+2. Use explicit table aliases (e.g., FROM "schema"."table" AS t) and qualify all columns in joins
+3. Never use SELECT * - always list required fields explicitly
+4. Only use LIMIT/OFFSET after ORDER BY, and never use OFFSET without LIMIT
+5. Use IS NULL / IS NOT NULL instead of = NULL for null checks
+
+AGGREGATION & GROUP BY:
+1. In GROUP BY queries:
+   - Include all non-aggregated SELECT fields in GROUP BY clause
+   - Never mix ungrouped columns with aggregate functions
+2. Never nest aggregate functions - use subqueries or CTEs instead
+3. Provide meaningful aliases for aggregated columns
+
+DATA TYPES:
+1. Use TO_TIMESTAMP() to convert text to timestamps before comparisons
+2. Use CAST() for proper type conversion in arithmetic/date functions
+3. Handle VARIANT/OBJECT/ARRAY types properly using ':' or GET_PATH()
+
+ERROR PREVENTION:
+1. Verify all column names exist and are correctly spelled (case-sensitive)
+2. Use only fully qualified table/schema references
+3. Verify all function parameters match Snowflake specifications
+4. Use only Snowflake-supported functions
+5. Use raw fields (not expressions) in GROUP BY
+6. Use ISO format 'YYYY-MM-DD HH24:MI:SS' for timestamp literals
+
+QUERY OPTIMIZATION:
+1. Use CTEs (WITH clauses) for complex logic
+2. Prefer QUALIFY over subqueries for window function filtering
+3. Use UNION ALL instead of UNION when deduplication isn't needed
+4. Add appropriate WHERE conditions to avoid full table scans
+
 Important Notes:
 1. **Crucial**: Always construct table references using the format `{database_id}.<schema_name>.<table_name>`. The `database_id` variable is provided for convenience and must match the `database` name in the `schema_info` object.
 2. **Use field descriptions**: Before selecting fields, read their descriptions to understand their semantic meaning and choose the most relevant fields for the query.

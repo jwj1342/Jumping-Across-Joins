@@ -20,9 +20,8 @@ from vectorization import VectorizedFieldManager
 from method.prompts import FIELD_EXTRACTION_PROMPT, field_extraction_parser
 from method.CypherTemplate import TABLE_BASED_DB_STRUCTURE_TREE_QUERY
 
-# 设置日志 - 避免重复输出
+# 设置日志 - 使用全局配置
 _logger = logging.getLogger(__name__)
-_logger.setLevel(logging.INFO)
 # 防止日志向上传播到根logger，避免重复输出
 _logger.propagate = False
 if not _logger.handlers:
@@ -114,7 +113,7 @@ def get_intelligent_db_summary(database_id: str, user_query: str, top_k: int = 1
         # 计算字段数量限制：基于top_k，但设置合理的上下限
         # 策略：允许比top_k稍多一些的字段提取，但不超过上限
         max_fields = min(max(top_k, 5), 20)  # 最少5个，最多20个
-        _logger.info(f"基于top_k={top_k}，设置最大字段提取数量为{max_fields}")
+        _logger.debug(f"基于top_k={top_k}，设置最大字段提取数量为{max_fields}")
             
         # 创建并执行chain
         chain = FIELD_EXTRACTION_PROMPT | llm | field_extraction_parser
@@ -220,90 +219,112 @@ def get_intelligent_db_summary(database_id: str, user_query: str, top_k: int = 1
         return {}
 
 
+# if __name__ == "__main__":
+#     print("=== InfoAgent功能测试 ===\n")
+    
+#     # 测试配置
+#     test_database = "CRYPTO"
+#     test_user_query = "Find all user information including addresses and transaction history"
+    
+#     # 1. 测试search_related_fields函数
+#     print("1. 测试search_related_fields函数...")
+#     test_queries = ["user information", "transaction data", "block data"]
+#     print(f"数据库: {test_database}")
+#     print(f"查询词: {test_queries}")
+    
+#     results = search_related_fields.invoke({
+#         "query": test_queries,
+#         "database_id": test_database,
+#         "top_k": 5
+#     })
+    
+#     if results:
+#         print("\n找到以下相关字段:")
+#         for result in results:
+#             print(f"\n- 字段: {result['field_name']} ({result['field_type']})")
+#             print(f"  表: {result['table']}")
+#             print(f"  匹配查询: {result['matched_query']}")
+#             print(f"  相似度分数: {result['similarity_score']:.3f}")
+#     else:
+#         print("\n未找到相关字段")
+    
+#     print("\n" + "="*50)
+    
+#     # 2. 测试智能摘要生成（包含相关表的所有字段）
+#     print("\n2. 测试智能摘要生成（包含相关表的所有字段）...")
+#     print(f"数据库: {test_database}")
+#     print(f"用户查询: {test_user_query}")
+    
+#     intelligent_summary = get_intelligent_db_summary(test_database, test_user_query)
+    
+#     if intelligent_summary:
+#         print("\n✅ 智能摘要生成成功!")
+#         print(f"数据库: {intelligent_summary.get('database', 'N/A')}")
+        
+#         # 显示搜索元信息
+#         metadata = intelligent_summary.get('_search_metadata', {})
+#         if metadata:
+#             print(f"\n搜索元信息:")
+#             print(f"  - 原始查询: {metadata.get('user_query', 'N/A')}")
+#             print(f"  - top_k参数: {metadata.get('top_k', 'N/A')}")
+#             print(f"  - 字段提取限制: {metadata.get('max_fields', 'N/A')}")
+#             print(f"  - 提取字段: {metadata.get('extracted_fields', [])}")
+#             print(f"  - 提取字段数: {metadata.get('extracted_fields_count', 0)}")
+#             print(f"  - 找到相关字段数: {metadata.get('found_fields_count', 0)}")
+#             print(f"  - 相关表数: {metadata.get('table_count', 0)}")
+#             print(f"  - 相关表名(全限定): {metadata.get('related_tables', [])}")
+        
+#         # 显示摘要结构
+#         schemas = intelligent_summary.get('schemas', [])
+#         print(f"\n摘要结构:")
+#         for schema in schemas:
+#             schema_name = schema.get('schema', 'Unknown')
+#             tables = schema.get('tables', [])
+#             print(f"  Schema: {schema_name} ({len(tables)} 个表)")
+            
+#             for table in tables[:3]:  # 只显示前3个表
+#                 table_name = table.get('table', 'Unknown')
+#                 fields = table.get('fields', [])
+#                 print(f"    Table: {table_name} ({len(fields)} 个字段)")
+                
+#                 for field in fields[:3]:  # 只显示前3个字段
+#                     if isinstance(field, dict):
+#                         field_name = field.get('name', 'Unknown')
+#                         field_type = field.get('type', 'Unknown')
+#                         field_desc = field.get('description', '')
+#                         field_id = field.get('field_id', 'Unknown')
+#                         print(f"      - {field_name} ({field_type})")
+#                         if field_desc:
+#                             print(f"        描述: {field_desc}")
+#                         print(f"        字段ID: {field_id}")
+#                     else:
+#                         print(f"      - {field}")
+#     else:
+#         print("\n❌ 智能摘要生成失败")
+    
+#     print("\n" + "="*50)
+    
+    
+#     print("\n=== 测试完成 ===")
+
 if __name__ == "__main__":
-    print("=== InfoAgent功能测试 ===\n")
+    # 测试 search_related_fields 工具
+    test_data = {
+        'query': ['station_id', 'station_number', 'date', 'record_date', 'average_temperature', 'temperature_avg', 'month', 'year', 'ranking', 'top_n'],
+        'database_id': 'NOAA_GSOD',
+        'top_k': 10
+    }
     
-    # 测试配置
-    test_database = "CRYPTO"
-    test_user_query = "Find all user information including addresses and transaction history"
-    
-    # 1. 测试search_related_fields函数
-    print("1. 测试search_related_fields函数...")
-    test_queries = ["user information", "transaction data", "block data"]
-    print(f"数据库: {test_database}")
-    print(f"查询词: {test_queries}")
-    
+    print("\n开始测试 search_related_fields...")
     results = search_related_fields.invoke({
-        "query": test_queries,
-        "database_id": test_database,
-        "top_k": 5
+        "query": test_data['query'],
+        "database_id": test_data['database_id'],
+        "top_k": test_data['top_k']
     })
     
-    if results:
-        print("\n找到以下相关字段:")
-        for result in results:
-            print(f"\n- 字段: {result['field_name']} ({result['field_type']})")
-            print(f"  表: {result['table']}")
-            print(f"  匹配查询: {result['matched_query']}")
-            print(f"  相似度分数: {result['similarity_score']:.3f}")
-    else:
-        print("\n未找到相关字段")
-    
-    print("\n" + "="*50)
-    
-    # 2. 测试智能摘要生成（包含相关表的所有字段）
-    print("\n2. 测试智能摘要生成（包含相关表的所有字段）...")
-    print(f"数据库: {test_database}")
-    print(f"用户查询: {test_user_query}")
-    
-    intelligent_summary = get_intelligent_db_summary(test_database, test_user_query)
-    
-    if intelligent_summary:
-        print("\n✅ 智能摘要生成成功!")
-        print(f"数据库: {intelligent_summary.get('database', 'N/A')}")
-        
-        # 显示搜索元信息
-        metadata = intelligent_summary.get('_search_metadata', {})
-        if metadata:
-            print(f"\n搜索元信息:")
-            print(f"  - 原始查询: {metadata.get('user_query', 'N/A')}")
-            print(f"  - top_k参数: {metadata.get('top_k', 'N/A')}")
-            print(f"  - 字段提取限制: {metadata.get('max_fields', 'N/A')}")
-            print(f"  - 提取字段: {metadata.get('extracted_fields', [])}")
-            print(f"  - 提取字段数: {metadata.get('extracted_fields_count', 0)}")
-            print(f"  - 找到相关字段数: {metadata.get('found_fields_count', 0)}")
-            print(f"  - 相关表数: {metadata.get('table_count', 0)}")
-            print(f"  - 相关表名(全限定): {metadata.get('related_tables', [])}")
-        
-        # 显示摘要结构
-        schemas = intelligent_summary.get('schemas', [])
-        print(f"\n摘要结构:")
-        for schema in schemas:
-            schema_name = schema.get('schema', 'Unknown')
-            tables = schema.get('tables', [])
-            print(f"  Schema: {schema_name} ({len(tables)} 个表)")
-            
-            for table in tables[:3]:  # 只显示前3个表
-                table_name = table.get('table', 'Unknown')
-                fields = table.get('fields', [])
-                print(f"    Table: {table_name} ({len(fields)} 个字段)")
-                
-                for field in fields[:3]:  # 只显示前3个字段
-                    if isinstance(field, dict):
-                        field_name = field.get('name', 'Unknown')
-                        field_type = field.get('type', 'Unknown')
-                        field_desc = field.get('description', '')
-                        field_id = field.get('field_id', 'Unknown')
-                        print(f"      - {field_name} ({field_type})")
-                        if field_desc:
-                            print(f"        描述: {field_desc}")
-                        print(f"        字段ID: {field_id}")
-                    else:
-                        print(f"      - {field}")
-    else:
-        print("\n❌ 智能摘要生成失败")
-    
-    print("\n" + "="*50)
-    
-    
-    print("\n=== 测试完成 ===")
+    print(f"\n找到 {len(results)} 个相关字段:")
+    for idx, result in enumerate(results, 1):
+        print(f"\n结果 {idx}:")
+        print(f"  字段ID: {result.get('field_id')}")
+        print(f"  相似度: {result.get('similarity_score', 0):.4f}")
+        print(f"  匹配查询: {result.get('matched_query')}")

@@ -60,6 +60,7 @@ class GraphBuilder:
         logger.info("第一阶段：分析表字段结构...")
         field_groups = defaultdict(list)  # {field_hash: [(table_info, schema_name, json_file), ...]}
         all_tables = []  # 存储所有表信息用于后续处理
+        table_to_group = {}  # 存储表到字段组的映射 {table_name: field_hash}
         
         schema_dirs = [d for d in os.listdir(db_path) if os.path.isdir(os.path.join(db_path, d))]
         
@@ -77,6 +78,10 @@ class GraphBuilder:
                     if not table_name:
                         continue
                     
+                    # 去掉表名中的模式前缀
+                    if '.' in table_name:
+                        table_name = table_name.split('.')[-1]
+                    
                     column_names = table_info.get('column_names', [])
                     column_types = table_info.get('column_types', [])
                     
@@ -84,6 +89,7 @@ class GraphBuilder:
                         field_hash = self.utils.calculate_field_group_hash(column_names, column_types)
                         field_groups[field_hash].append((table_info, schema_name, json_file))
                         all_tables.append((table_info, schema_name, json_file, field_hash))
+                        table_to_group[f"{schema_name}.{table_name}"] = field_hash
                         
                 except Exception as e:
                     logger.error(f"分析表文件失败 {json_file}: {e}")
@@ -119,7 +125,10 @@ class GraphBuilder:
             shared_field_groups[field_hash] = group_name
             
             logger.info(f"创建优化字段组 {field_hash[:8]}... 包含 {table_count} 个表:")
-            for table_name in tables[:5]:  # 只显示前5个表
+            for table_info in tables[:5]:  # 只显示前5个表
+                table_name = table_info[0].get('table_name', '')
+                if '.' in table_name:
+                    table_name = table_name.split('.')[-1]
                 logger.info(f"    - {table_name}")
             if len(tables) > 5:
                 logger.info(f"    ... 还有 {len(tables) - 5} 个表")
@@ -149,23 +158,23 @@ class GraphBuilder:
                     description = descriptions[i] if i < len(descriptions) and descriptions[i] else ""
                     sample_data = self.utils.extract_sample_data(sample_rows, col_name)
                     
-                    # 为共享字段组创建字段节点（每个字段组有独立的字段实例）
-                    field_key = f"{group_name}.{col_name}:{col_type}:shared"
+                    # 为共享字段组创建字段节点（确保数据库级别唯一性）
+                    field_key = f"{db_name}.{schema}.{field_hash}.{col_name}:{col_type}:shared"
                     if field_key not in self.all_fields:
-                        # 创建字段节点（包含字段组标识，确保独立性）
-                        node_created = self.node_creator.create_shared_field_node(col_name, col_type, db_name, schema, group_name, description, sample_data)
+                        # 创建字段节点（包含数据库和字段组标识，确保全局唯一性）
+                        node_created = self.node_creator.create_shared_field_node(col_name, col_type, db_name, schema, field_hash, description, sample_data)
                         if node_created:
                             # 节点创建成功，创建关系
-                            rel_created = self.relationship_creator.create_group_has_field_relationship(group_name, col_name, schema)
+                            rel_created = self.relationship_creator.create_group_has_field_relationship(field_hash, col_name, schema, db_name)
                             if rel_created:
                                 self.all_fields[field_key] = True
-                                logger.debug(f"      字段组关系: {group_name} -> {col_name}")
+                                logger.debug(f"      字段组关系: {group_name} -> {col_name} (数据库: {db_name})")
                             else:
                                 logger.error(f"      字段组关系创建失败: {group_name} -> {col_name}")
                         else:
                             logger.error(f"      字段节点创建失败: {col_name} ({col_type}) - 可能包含特殊字符")
                     else:
-                        logger.warning(f"      字段已存在，跳过: {col_name}")
+                        logger.warning(f"      字段已存在，跳过: {col_name} (数据库: {db_name})")
                 
                 # 记录这个字段组信息
                 self.field_groups[field_hash] = group_info
@@ -194,6 +203,10 @@ class GraphBuilder:
                     table_name = table_info.get('table_name', '')
                     if not table_name:
                         continue
+                        
+                    # 去掉表名中的模式前缀
+                    if '.' in table_name:
+                        table_name = table_name.split('.')[-1]
                     
                     column_names = table_info.get('column_names', [])
                     column_types = table_info.get('column_types', [])
@@ -201,7 +214,7 @@ class GraphBuilder:
                     # 获取DDL信息
                     ddl_file = os.path.join(schema_path, "DDL.csv")
                     ddl_info = self.utils.load_ddl_info(ddl_file)
-                    ddl = ddl_info.get(table_name.split('.')[-1], "")
+                    ddl = ddl_info.get(table_name, "")
                     
                     # 创建表节点
                     logger.debug(f"  处理表: {table_name}")
@@ -212,7 +225,9 @@ class GraphBuilder:
                     self.relationship_creator.create_has_table_relationship(schema_name, table_name, db_name)
                     
                     # 处理表的字段关系（支持混合模式：共享字段组 + 独有字段）
-                    shared_fields_count, unique_fields_count = self.create_table_field_relationships_mixed_mode(table_info, table_name, schema_name, db_name)
+                    shared_fields_count, unique_fields_count = self.create_table_field_relationships_mixed_mode(
+                        table_info, table_name, schema_name, db_name, field_hash, table_to_group
+                    )
                     
                     # 显示字段关系汇总
                     total_fields = len(column_names)
@@ -247,7 +262,8 @@ class GraphBuilder:
     
     def create_table_field_relationships_mixed_mode(self, table_info: Dict[str, Any], 
                                                    table_name: str, schema_name: str, 
-                                                   db_name: str) -> Tuple[int, int]:
+                                                   db_name: str, field_hash: str,
+                                                   table_to_group: Dict[str, str]) -> Tuple[int, int]:
         """
         为表创建字段关系（精确匹配模式）
         返回 (共享字段关系数, 独有字段关系数)
@@ -262,42 +278,37 @@ class GraphBuilder:
         
         logger.info(f"    -> 精确匹配字段关系 ({len(column_names)} 个字段)")
         
-        # 构建表的字段列表
-        table_fields = []
-        for i, col_name in enumerate(column_names):
-            col_type = column_types[i] if i < len(column_types) else "UNKNOWN"
-            table_fields.append((col_name, col_type))
-        
-        # 尝试找到与表字段集合完全匹配的字段组
-        exact_matching_group = self.utils.find_exact_matching_field_group(table_fields, schema_name, self.field_groups)
-        
-        if exact_matching_group:
-            # 找到精确匹配的字段组，创建表->字段组关系
-            logger.info(f"    ✓ 表 {table_name} 精确匹配到字段组: {exact_matching_group}")
-            logger.info(f"      表字段集合: {[f'{name}:{type_}' for name, type_ in table_fields]}")
+        # 检查表是否属于某个字段组
+        table_key = f"{schema_name}.{table_name}"
+        if table_key in table_to_group and table_to_group[table_key] in self.field_groups:
+            # 表属于字段组，创建表->字段组关系
+            group_hash = table_to_group[table_key]
+            group_info = self.field_groups[group_hash]
+            group_name = group_info['group_name']
+            
+            logger.info(f"    ✓ 表 {table_name} 精确匹配到字段组: {group_name} (ID: {group_hash[:8]}...)")
             
             # 创建USES_FIELD_GROUP关系
-            self.relationship_creator.create_uses_field_group_relationship(table_name, exact_matching_group, schema_name)
+            self.relationship_creator.create_uses_field_group_relationship(table_name, group_hash, schema_name, db_name)
             shared_fields_count = len(column_names)
             
         else:
-            # 没有找到精确匹配的字段组，所有字段都作为独有字段处理
+            # 表不属于任何字段组，所有字段都作为独有字段处理
             logger.info(f"    ✗ 表 {table_name} 没有找到精确匹配的字段组，创建独有字段")
-            logger.info(f"      表字段集合: {[f'{name}:{type_}' for name, type_ in table_fields]}")
             
             for i, col_name in enumerate(column_names):
                 col_type = column_types[i] if i < len(column_types) else "UNKNOWN"
                 description = descriptions[i] if i < len(descriptions) and descriptions[i] else ""
                 sample_data = self.utils.extract_sample_data(sample_rows, col_name)
                 
-                # 创建独有字段
-                field_key = f"{schema_name}.{col_name}:{col_type}:{table_name}"
+                # 创建独有字段（确保数据库级别唯一性）
+                field_key = f"{db_name}.{schema_name}.{table_name}.{col_name}:{col_type}:unique"
                 if field_key not in self.all_fields:
                     if self.node_creator.create_field_node(col_name, col_type, db_name, schema_name, table_name, description, sample_data):
                         self.all_fields[field_key] = True
                         # 创建表->独有字段的关系
-                        self.relationship_creator.create_table_has_field_relationship(table_name, col_name, schema_name, field_key)
-                        logger.debug(f"      创建独有字段: {col_name} ({col_type}) -> {table_name}")
+                        self.relationship_creator.create_table_has_field_relationship(table_name, col_name, schema_name, field_key, db_name)
+                        logger.debug(f"      创建独有字段: {col_name} ({col_type}) -> {table_name} (数据库: {db_name})")
                         unique_fields_count += 1
         
         return shared_fields_count, unique_fields_count

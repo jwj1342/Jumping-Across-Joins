@@ -415,14 +415,7 @@ class VectorizedFieldManager:
             for i, field in enumerate(fields):
                 metadata = {
                     'vector_index': i,
-                    'field_id': field['id'],
-                    'field_name': field['name'],
-                    'field_type': field['type'],
-                    'table': field['table'],
-                    'database': field['database'],
-                    'schema': field.get('schema', ''),
-                    'description': field['description'],
-                    'vectorization_text': all_texts[i]
+                    'field_id': field['id']
                 }
                 f.write(json.dumps(metadata, ensure_ascii=False) + '\n')
         
@@ -584,9 +577,14 @@ class VectorizedFieldManager:
             self.cypher_executor.close()
 
 
-def test():
-    """测试和演示函数"""
-    print("=== 字段向量化系统测试 ===\n")
+def test(database_name: str = None):
+    """
+    测试函数 - 对单一数据库进行向量化处理
+    
+    Args:
+        database_name (str, optional): 要处理的数据库名称，如果为None则会提示选择
+    """
+    print("=== 数据库字段向量化处理 ===\n")
     
     # 初始化管理器
     manager = VectorizedFieldManager(enable_info_logging=True)
@@ -607,61 +605,51 @@ def test():
             print("❌ 没有找到任何数据库")
             return
         
-        print(f"✅ 找到 {len(databases)} 个数据库: {databases}")
-        
-        # 选择一个数据库进行测试（优先选择CRYPTO，如果没有则选择第一个）
-        test_database = "CRYPTO" if "CRYPTO" in databases else databases[0]
-        
-        print(f"\n3. 测试字段获取和向量化格式（使用数据库: {test_database}）...")
-        # 获取少量字段用于格式测试
-        test_fields = manager.get_database_fields_paginated(test_database, page_size=3)
-        
-        if test_fields:
-            for field in test_fields:
-                formatted_text = manager.format_field_for_vectorization(field)
-                print(f"   字段ID: {field['id']}")
-                print(f"   向量化文本: {formatted_text}")
-                print()
-        else:
-            print(f"   数据库 {test_database} 中没有找到字段")
-        
-        # 测试单数据库向量化
-        print(f"4. 测试单数据库向量化（{test_database}）...")
-        if manager.vectorize_database(test_database, page_size=50, embedding_batch_size=10):
-            print(f"✅ 数据库 {test_database} 向量化成功")
-        else:
-            print(f"❌ 数据库 {test_database} 向量化失败")
+        print(f"发现 {len(databases)} 个数据库: {databases}\n")
+        # 确定要处理的数据库
+        if database_name is None:
+            print("❌ 未指定数据库名称")
             return
-        print()
+        elif database_name not in databases:
+            print(f"❌ 数据库 '{database_name}' 不存在")
+            return
+            
+        print(f"\n3. 开始处理数据库: {database_name}")
+        print("=" * 50)
         
+        # 执行向量化处理
+        if manager.vectorize_database(database_name, page_size=100, embedding_batch_size=50, show_progress=True):
+            print(f"\n✅ 数据库 {database_name} 向量化成功!")
+            print(f"   索引文件已保存至: resource/vector/faiss_index_{database_name}.bin")
+            print(f"   元数据文件已保存至: resource/vector/metadata_{database_name}.jsonl")
+        else:
+            print(f"\n❌ 数据库 {database_name} 向量化失败")
+            return
+            
         # 测试检索功能
-        print("5. 测试检索功能...")
+        print("\n4. 测试检索功能...")
         test_queries = [
             "user information",
-            "timestamp field", 
-            "transaction data",
-            "block data",
-            "address"
+            "timestamp field"
         ]
         
         for query in test_queries:
             print(f"\n查询: '{query}'")
-            results = manager.search_fields(query, test_database, top_k=3)
+            results = manager.search_fields(query, database_name, top_k=3)
             
             if results:
                 print(f"找到 {len(results)} 个相关字段:")
                 for result in results:
-                    print(f"  {result['rank']}. {result['field_name']} ({result['field_type']})")
-                    print(f"     表: {result['table']}")
+                    print(f"  {result['rank']}. Field ID: {result['field_id']}")
                     print(f"     相似度: {result['similarity_score']:.3f}")
             else:
                 print("  没有找到相关字段")
         
-        print("\n=== 测试完成 ===")
+        print("\n=== 处理完成 ===")
         
     except Exception as e:
-        logging.error(f"测试过程中出现错误: {e}")
-        print(f"❌ 测试失败: {e}")
+        logging.error(f"处理过程中出现错误: {e}")
+        print(f"❌ 处理失败: {e}")
     
     finally:
         # 关闭连接
@@ -669,26 +657,26 @@ def test():
 
 
 if __name__ == "__main__":
-    # test()  # 取消注释以运行测试
+    test("NOAA_GSOD")  # 取消注释以运行测试
     
     # 初始化管理器 - 关闭详细日志以减少输出
-    manager = VectorizedFieldManager(enable_info_logging=False)
+    # manager = VectorizedFieldManager(enable_info_logging=False)
     
-    try:
-        print("开始全量向量化...")
-        print("注意: 这可能需要较长时间，请耐心等待")
-        print("=" * 50)
+    # try:
+    #     print("开始全量向量化...")
+    #     print("注意: 这可能需要较长时间，请耐心等待")
+    #     print("=" * 50)
         
-        if manager.vectorize_all_databases(page_size=200, embedding_batch_size=50):
-            print("\n🎉 全量向量化成功完成!")
-        else:
-            print("\n❌ 全量向量化失败")
+    #     if manager.vectorize_all_databases(page_size=200, embedding_batch_size=50):
+    #         print("\n🎉 全量向量化成功完成!")
+    #     else:
+    #         print("\n❌ 全量向量化失败")
             
-    except KeyboardInterrupt:
-        print("\n⚠️  用户中断操作")
-    except Exception as e:
-        print(f"\n❌ 全量向量化失败: {e}")
-        logging.error(f"Vectorization failed with exception: {e}")
-    finally:
-        manager.close()
-        print("连接已关闭")
+    # except KeyboardInterrupt:
+    #     print("\n⚠️  用户中断操作")
+    # except Exception as e:
+    #     print(f"\n❌ 全量向量化失败: {e}")
+    #     logging.error(f"Vectorization failed with exception: {e}")
+    # finally:
+    #     manager.close()
+    #     print("连接已关闭")

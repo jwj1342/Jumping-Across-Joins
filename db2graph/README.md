@@ -193,6 +193,68 @@ python GraphBuild.py [database_name] --stats
 python GraphBuild.py NORTHWIND --clear --stats
 ```
 
+### 🔥 多线程批量构建（main.py）
+
+```bash
+# 单线程构建所有数据库（默认）
+python main.py
+
+# 使用4个线程并行构建
+python main.py --threads 4
+
+# 使用8个线程并行构建并显示详细统计
+python main.py --threads 8 --stats
+
+# 只构建指定数据库
+python main.py --single NORTHWIND
+
+# 验证数据库目录
+python main.py --verify-only
+
+# 列出所有数据库ID
+python main.py --list-only
+
+# 先清理所有数据（推荐在多线程前执行）
+python main.py --single ANY_DB --clear
+python main.py --threads 4  # 然后多线程构建
+```
+
+### 🚀 多线程性能优化建议
+
+#### 线程数选择
+
+- **小量数据库（<10 个）**：单线程 `--threads 1`
+- **中量数据库（10-50 个）**：2-4 线程 `--threads 2-4`
+- **大量数据库（>50 个）**：4-8 线程 `--threads 4-8`
+
+#### 性能最佳实践
+
+```bash
+# 1. 先验证所有数据库目录
+python main.py --verify-only
+
+# 2. 清理现有数据（如需要）
+python main.py --single ANY_DB --clear
+
+# 3. 多线程并行构建
+python main.py --threads 4 --stats
+
+# 4. 查看性能报告
+# 程序会显示：并行加速比、效率、理论vs实际耗时
+```
+
+#### Neo4j 配置建议
+
+多线程模式需要 Neo4j 支持并发连接：
+
+```
+# neo4j.conf
+dbms.connector.bolt.thread_pool_min_size=5
+dbms.connector.bolt.thread_pool_max_size=400
+dbms.connector.http.thread_pool_min_size=5
+dbms.connector.http.thread_pool_max_size=400
+```
+
 ### 编程接口
 
 ```python

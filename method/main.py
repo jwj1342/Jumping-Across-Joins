@@ -25,8 +25,6 @@ sys.path.insert(0, str(current_dir))
 
 from Communicate import SystemState
 from BuildAgentSystem import build_agent_system
-
-# 导入连接池模块
 try:
     from utils.SnowflakeConnectionPool import get_global_pool, close_global_pool, get_pool_stats
     HAS_CONNECTION_POOL = True
@@ -220,16 +218,12 @@ def process_single_query_with_stats(
             with log_lock:
                 logger.warning(f"清理线程工作目录失败: {e}")
 
-# ===== Agent节点函数已移动到BuildAgentSystem.py中 =====
-
-
-
 # ===== 工具函数 =====
 
 def setup_logging() -> None:
     """设置日志配置"""
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.ERROR,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[
             logging.FileHandler('sql_generation.log'),
@@ -511,7 +505,7 @@ def main():
     
     # 解析命令行参数
     parser = argparse.ArgumentParser(description='SQL生成系统 - 批量处理模式')
-    parser.add_argument('--input-file', '-i', type=str, default='spider2-snow-instances-nodata.jsonl', help='输入文件路径')
+    parser.add_argument('--input-file', '-i', type=str, default='spider2-snow-instances-failed.jsonl', help='输入文件路径')
     parser.add_argument('--max-workers', type=int, default=min(16, (os.cpu_count() or 1) + 4), help='最大工作线程数')
     parser.add_argument('--timeout', type=int, default=300, help='单个查询超时时间(秒)')
     
@@ -639,4 +633,5 @@ def main():
                 logger.warning(f"关闭连接池失败: {e}")
 
 if __name__ == "__main__":
+
     main()
