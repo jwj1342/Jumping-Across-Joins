@@ -10,9 +10,8 @@ from openai import OpenAI
 from tqdm import tqdm
 from utils.CypherExecutor import CypherExecutor
 
-
 class VectorizedFieldManager:
-    def __init__(self, enable_info_logging=True):
+    def __init__(self, enable_info_logging=False):
         """
         初始化向量化字段管理器
         
@@ -20,6 +19,9 @@ class VectorizedFieldManager:
             enable_info_logging (bool): 是否启用info级别日志
         """
         self.enable_info_logging = enable_info_logging
+        
+        # 创建独立的logger，避免影响全局日志配置
+        self.logger = logging.getLogger(f"{__name__}.VectorizedFieldManager")
         self.setup_logging()
         
         # 加载环境变量
@@ -42,39 +44,50 @@ class VectorizedFieldManager:
         self.embedding_dim = 1536  # text-embedding-3-small的维度
         
     def setup_logging(self):
-        """设置日志配置"""
-        # 设置全局日志级别为ERROR，减少噪音
-        logging.basicConfig(
-            level=logging.ERROR,
-            format='%(asctime)s - %(levelname)s - %(message)s'
-        )
-        
-        # 如果启用详细日志，则设置为DEBUG级别
+        """设置独立的日志配置，不影响全局设置"""
+        # 为当前实例创建独立的logger
+        if not self.logger.handlers:  # 避免重复添加handler
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+            
+        # 设置日志级别
         if self.enable_info_logging:
-            logging.getLogger().setLevel(logging.DEBUG)
+            self.logger.setLevel(logging.DEBUG)
+        else:
+            self.logger.setLevel(logging.ERROR)
+            
+        # 防止日志向上传播到根logger
+        self.logger.propagate = False
     
     def _log_info(self, message: str):
         """条件性记录debug日志"""
         if self.enable_info_logging:
-            logging.debug(message)
+            self.logger.debug(message)
     
     def get_database_list(self) -> List[str]:
         """
-        获取所有数据库列表
+        获取所有包含字段的数据库列表
         
         Returns:
             List[str]: 数据库名称列表
         """
         cypher_query = """
-        MATCH (f:Field)
-        RETURN DISTINCT f.database as database
-        ORDER BY f.database
+        MATCH (db:Database)
+        WHERE EXISTS {
+            (db)-[:HAS_SCHEMA]->(:Schema)-[:HAS_TABLE]->(:Table)-[:HAS_UNIQUE_FIELD]->(:Field)
+        } OR EXISTS {
+            (db)-[:HAS_SCHEMA]->(:Schema)-[:HAS_TABLE]->(:Table)-[:USES_FIELD_GROUP]->(:SharedFieldGroup)-[:HAS_FIELD]->(:Field)
+        }
+        RETURN DISTINCT db.name as database
+        ORDER BY db.name
         """
         
         success, results = self.cypher_executor.execute_transactional_cypher(cypher_query)
         
         if not success:
-            logging.error("Failed to fetch database list")
+            self.logger.error("Failed to fetch database list")
             return []
         
         databases = [result.get('database', 'UNKNOWN') for result in results if result.get('database')]
@@ -83,7 +96,7 @@ class VectorizedFieldManager:
     
     def get_database_field_count(self, database: str) -> int:
         """
-        获取指定数据库的字段总数
+        获取指定数据库的字段总数，支持两种字段连接方式
         
         Args:
             database (str): 数据库名称
@@ -92,9 +105,20 @@ class VectorizedFieldManager:
             int: 字段总数
         """
         cypher_query = """
-        MATCH (f:Field)
-        WHERE f.database = $database
-        RETURN count(f) as total_count
+        MATCH (db:Database {name: $database})
+        
+        // 方式1: 表直接拥有的独有字段
+        OPTIONAL MATCH (db)-[:HAS_SCHEMA]->(:Schema)-[:HAS_TABLE]->(:Table)-[:HAS_UNIQUE_FIELD]->(uf:Field)
+        
+        // 方式2: 表通过字段组间接拥有的共享字段
+        OPTIONAL MATCH (db)-[:HAS_SCHEMA]->(:Schema)-[:HAS_TABLE]->(:Table)-[:USES_FIELD_GROUP]->(:SharedFieldGroup)-[:HAS_FIELD]->(gf:Field)
+        
+        // 统计总数（避免重复计算）
+        WITH COLLECT(DISTINCT uf) + COLLECT(DISTINCT gf) AS all_fields
+        UNWIND all_fields AS field
+        WITH field
+        WHERE field IS NOT NULL
+        RETURN count(DISTINCT field) as total_count
         """
         
         parameters = {"database": database}
@@ -102,7 +126,7 @@ class VectorizedFieldManager:
         success, results = self.cypher_executor.execute_transactional_cypher(cypher_query, parameters)
         
         if not success or not results:
-            logging.error(f"Failed to get field count for database {database}")
+            self.logger.error(f"Failed to get field count for database {database}")
             return 0
         
         count = results[0].get('total_count', 0)
@@ -112,7 +136,7 @@ class VectorizedFieldManager:
     def get_database_fields_paginated(self, database: str, page_size: int = 100, 
                                     offset: int = 0) -> List[Dict]:
         """
-        分页获取指定数据库的字段信息
+        分页获取指定数据库的字段信息，支持两种字段连接方式
         
         Args:
             database (str): 数据库名称
@@ -123,18 +147,57 @@ class VectorizedFieldManager:
             List[Dict]: 字段信息列表
         """
         cypher_query = """
-        MATCH (f:Field)
-        WHERE f.database = $database
-        RETURN elementId(f) as field_id, 
-               f.name as field_name, 
-               f.type as field_type, 
-               f.database as database, 
-               f.table as table_name, 
-               f.description as description,
-               f.schema as schema
-        ORDER BY f.table, f.name
+        MATCH (db:Database {name: $database})
+        
+        // 方式1: 表直接拥有的独有字段 Table -[HAS_UNIQUE_FIELD]-> Field
+        OPTIONAL MATCH (db)-[:HAS_SCHEMA]->(schema1:Schema)-[:HAS_TABLE]->(table1:Table)-[:HAS_UNIQUE_FIELD]->(uf:Field)
+        
+        // 方式2: 表通过字段组间接拥有的共享字段 Table -[USES_FIELD_GROUP]-> SharedFieldGroup -[HAS_FIELD]-> Field  
+        OPTIONAL MATCH (db)-[:HAS_SCHEMA]->(schema2:Schema)-[:HAS_TABLE]->(table2:Table)-[:USES_FIELD_GROUP]->(sfg:SharedFieldGroup)-[:HAS_FIELD]->(gf:Field)
+        
+        // 合并所有字段信息
+        WITH COLLECT(DISTINCT {
+            field_id: elementId(uf),
+            field_name: uf.name,
+            field_type: uf.type,
+            database: uf.database,
+            table_name: uf.table,
+            description: COALESCE(uf.description, ''),
+            schema: uf.schema,
+            field_source: 'unique_field',
+            source_table: table1.name
+        }) + COLLECT(DISTINCT {
+            field_id: elementId(gf),
+            field_name: gf.name,
+            field_type: gf.type,
+            database: gf.database,
+            table_name: gf.table,
+            description: COALESCE(gf.description, ''),
+            schema: gf.schema,
+            field_source: 'shared_field',
+            source_table: table2.name
+        }) AS all_fields
+        
+        // 展开并过滤空值
+        UNWIND all_fields AS field_info
+        WITH field_info
+        WHERE field_info.field_name IS NOT NULL
+        
+        // 排序和分页
+        WITH field_info
+        ORDER BY field_info.schema, field_info.source_table, field_info.field_name
         SKIP $offset
         LIMIT $page_size
+        
+        RETURN field_info.field_id as field_id,
+               field_info.field_name as field_name,
+               field_info.field_type as field_type,
+               field_info.database as database,
+               field_info.table_name as table_name,
+               field_info.description as description,
+               field_info.schema as schema,
+               field_info.field_source as field_source,
+               field_info.source_table as source_table
         """
         
         parameters = {
@@ -147,7 +210,7 @@ class VectorizedFieldManager:
         success, results = self.cypher_executor.execute_transactional_cypher(cypher_query, parameters)
         
         if not success:
-            logging.error(f"Failed to fetch fields for database {database} (offset: {offset})")
+            self.logger.error(f"Failed to fetch fields for database {database} (offset: {offset})")
             return []
         
         fields = []
@@ -159,7 +222,9 @@ class VectorizedFieldManager:
                 'database': result.get('database'),
                 'table': result.get('table_name'),
                 'description': result.get('description', ''),
-                'schema': result.get('schema', '')
+                'schema': result.get('schema', ''),
+                'field_source': result.get('field_source'),  # 'unique_field' 或 'shared_field'
+                'source_table': result.get('source_table')   # 实际关联的表名
             }
             fields.append(field_info)
         
@@ -200,7 +265,7 @@ class VectorizedFieldManager:
             fields = self.get_database_fields_paginated(database, page_size, offset)
             
             if not fields:
-                logging.warning(f"No fields returned for database {database} at offset {offset}")
+                self.logger.warning(f"No fields returned for database {database} at offset {offset}")
                 break
             
             all_fields.extend(fields)
@@ -236,43 +301,43 @@ class VectorizedFieldManager:
             databases = target_databases
         
         if not databases:
-            logging.error("No databases found")
+            self.logger.error("No databases found")
             return {}
         
         if show_progress:
-            print(f"开始获取 {len(databases)} 个数据库的字段信息...")
+            self.logger.info(f"开始获取 {len(databases)} 个数据库的字段信息...")
         
         fields_by_database = {}
         
         for i, database in enumerate(databases, 1):
             if show_progress:
-                print(f"\n[{i}/{len(databases)}] 处理数据库: {database}")
+                self.logger.info(f"[{i}/{len(databases)}] 处理数据库: {database}")
             
             try:
                 fields = self.get_all_database_fields(database, page_size, show_progress)
                 fields_by_database[database] = fields
                 
                 if show_progress:
-                    print(f"  ✅ 完成数据库 {database}: {len(fields)} 个字段")
+                    self.logger.info(f"  ✅ 完成数据库 {database}: {len(fields)} 个字段")
                     
             except Exception as e:
-                logging.error(f"Failed to load fields for database {database}: {e}")
+                self.logger.error(f"Failed to load fields for database {database}: {e}")
                 fields_by_database[database] = []
                 if show_progress:
-                    print(f"  ❌ 数据库 {database} 加载失败: {e}")
+                    self.logger.error(f"  ❌ 数据库 {database} 加载失败: {e}")
         
         total_fields = sum(len(fields) for fields in fields_by_database.values())
         self._log_info(f"Retrieved {total_fields} fields from {len(fields_by_database)} databases")
         
         if show_progress:
-            print(f"\n=== 获取完成 ===")
-            print(f"总计: {total_fields} 个字段，来自 {len(fields_by_database)} 个数据库")
+            self.logger.info(f"=== 获取完成 ===")
+            self.logger.info(f"总计: {total_fields} 个字段，来自 {len(fields_by_database)} 个数据库")
         
         return fields_by_database
     
     def format_field_for_vectorization(self, field_info: Dict) -> str:
         """
-        将字段信息格式化为向量化文本
+        将字段信息格式化为向量化文本，包含字段来源信息
         
         Args:
             field_info (Dict): 字段信息
@@ -286,19 +351,29 @@ class VectorizedFieldManager:
         database = field_info.get('database', 'unknown')
         schema = field_info.get('schema', '')
         description = field_info.get('description', '').strip()
+        field_source = field_info.get('field_source', 'unknown')
+        source_table = field_info.get('source_table', table_name)
         
         # 构建完整的表名（包含schema）
         if schema and schema.strip():
-            full_table_name = f"{schema}.{table_name}"
+            full_table_name = f"{schema}.{source_table}"
         else:
-            full_table_name = table_name
+            full_table_name = source_table
+        
+        # 根据字段来源类型添加不同的描述信息
+        if field_source == 'unique_field':
+            source_desc = f"unique field from table {full_table_name}"
+        elif field_source == 'shared_field':
+            source_desc = f"shared field accessible through table {full_table_name}"
+        else:
+            source_desc = f"field from table {full_table_name}"
         
         if description:
             desc_text = f"Description: {description}"
         else:
             desc_text = "No description available."
         
-        return f"Field {field_name} (type: {field_type}), from table {full_table_name} in database {database}. {desc_text}"
+        return f"Field {field_name} (type: {field_type}), {source_desc} in database {database}. {desc_text}"
     
     def get_embeddings(self, texts: List[str]) -> List[List[float]]:
         """
@@ -321,7 +396,7 @@ class VectorizedFieldManager:
             return embeddings
             
         except Exception as e:
-            logging.error(f"Failed to generate embeddings: {e}")
+            self.logger.error(f"Failed to generate embeddings: {e}")
             return []
     
     def build_faiss_index(self, embeddings: List[List[float]]) -> faiss.IndexFlatIP:
@@ -384,12 +459,11 @@ class VectorizedFieldManager:
         for i in batch_range:
             batch_fields = fields[i:i + embedding_batch_size]
             batch_texts = [self.format_field_for_vectorization(field) for field in batch_fields]
-            
             # 获取当前批次的向量
             batch_embeddings = self.get_embeddings(batch_texts)
             if not batch_embeddings:
                 batch_num = i // embedding_batch_size + 1
-                logging.error(f"Failed to generate embeddings for batch {batch_num} of database {database}")
+                self.logger.error(f"Failed to generate embeddings for batch {batch_num} of database {database}")
                 return False
             
             all_embeddings.extend(batch_embeddings)
@@ -441,7 +515,7 @@ class VectorizedFieldManager:
         # 检查数据库是否存在
         databases = self.get_database_list()
         if database_name not in databases:
-            logging.error(f"Database {database_name} not found. Available databases: {databases}")
+            self.logger.error(f"Database {database_name} not found. Available databases: {databases}")
             return False
         
         return self.save_database_vectors(database_name, page_size, embedding_batch_size, show_progress)
@@ -465,7 +539,7 @@ class VectorizedFieldManager:
         databases = self.get_database_list()
         
         if not databases:
-            logging.error("No databases found")
+            self.logger.error("No databases found")
             return False
         
         success_count = 0
@@ -486,12 +560,12 @@ class VectorizedFieldManager:
                             '当前': database[:15] + '...' if len(database) > 15 else database
                         })
                 else:
-                    logging.error(f"Failed to vectorize database: {database}")
+                    self.logger.error(f"Failed to vectorize database: {database}")
             except Exception as e:
-                logging.error(f"Exception during vectorization of database {database}: {e}")
+                self.logger.error(f"Exception during vectorization of database {database}: {e}")
         
         if show_progress:
-            print(f"\n全量向量化完成: {success_count}/{total_count} 个数据库成功")
+            self.logger.info(f"全量向量化完成: {success_count}/{total_count} 个数据库成功")
         
         self._log_info(f"Vectorization completed: {success_count}/{total_count} databases successful")
         return success_count == total_count
@@ -510,7 +584,7 @@ class VectorizedFieldManager:
         metadata_path = self.vector_dir / f"metadata_{database}.jsonl"
         
         if not index_path.exists() or not metadata_path.exists():
-            logging.error(f"Index or metadata file not found for database {database}")
+            self.logger.error(f"Index or metadata file not found for database {database}")
             return None, None
         
         try:
@@ -527,7 +601,7 @@ class VectorizedFieldManager:
             return index, metadata
             
         except Exception as e:
-            logging.error(f"Failed to load index for database {database}: {e}")
+            self.logger.error(f"Failed to load index for database {database}: {e}")
             return None, None
     
     def search_fields(self, query: str, database: str, top_k: int = 5) -> List[Dict]:
@@ -550,7 +624,7 @@ class VectorizedFieldManager:
         # 向量化查询
         query_embeddings = self.get_embeddings([query])
         if not query_embeddings:
-            logging.error("Failed to generate query embedding")
+            self.logger.error("Failed to generate query embedding")
             return []
         
         query_vector = np.array([query_embeddings[0]], dtype=np.float32)
@@ -584,72 +658,82 @@ def test(database_name: str = None):
     Args:
         database_name (str, optional): 要处理的数据库名称，如果为None则会提示选择
     """
-    print("=== 数据库字段向量化处理 ===\n")
+    # 创建独立的logger用于测试函数
+    test_logger = logging.getLogger(f"{__name__}.test")
+    test_logger.setLevel(logging.INFO)
+    if not test_logger.handlers:
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+        test_logger.addHandler(handler)
+    test_logger.propagate = False
+    
+    test_logger.info("=== 数据库字段向量化处理 ===")
     
     # 初始化管理器
     manager = VectorizedFieldManager(enable_info_logging=True)
     
     try:
         # 验证数据库连接
-        print("1. 验证数据库连接...")
+        test_logger.info("1. 验证数据库连接...")
         if not manager.cypher_executor.verify_connectivity():
-            print("❌ 数据库连接失败")
+            test_logger.error("❌ 数据库连接失败")
             return
-        print("✅ 数据库连接成功\n")
+        test_logger.info("✅ 数据库连接成功")
         
         # 获取数据库列表
-        print("2. 获取数据库列表...")
+        test_logger.info("2. 获取数据库列表...")
         databases = manager.get_database_list()
         
         if not databases:
-            print("❌ 没有找到任何数据库")
+            test_logger.error("❌ 没有找到任何数据库")
             return
         
-        print(f"发现 {len(databases)} 个数据库: {databases}\n")
+        test_logger.info(f"发现 {len(databases)} 个数据库: {databases}")
         # 确定要处理的数据库
         if database_name is None:
-            print("❌ 未指定数据库名称")
+            test_logger.error("❌ 未指定数据库名称")
             return
         elif database_name not in databases:
-            print(f"❌ 数据库 '{database_name}' 不存在")
+            test_logger.error(f"❌ 数据库 '{database_name}' 不存在")
             return
             
-        print(f"\n3. 开始处理数据库: {database_name}")
-        print("=" * 50)
+        test_logger.info(f"3. 开始处理数据库: {database_name}")
+        test_logger.info("=" * 50)
         
         # 执行向量化处理
         if manager.vectorize_database(database_name, page_size=100, embedding_batch_size=50, show_progress=True):
-            print(f"\n✅ 数据库 {database_name} 向量化成功!")
-            print(f"   索引文件已保存至: resource/vector/faiss_index_{database_name}.bin")
-            print(f"   元数据文件已保存至: resource/vector/metadata_{database_name}.jsonl")
+            test_logger.info(f"✅ 数据库 {database_name} 向量化成功!")
+            test_logger.info(f"   索引文件已保存至: resource/vector/faiss_index_{database_name}.bin")
+            test_logger.info(f"   元数据文件已保存至: resource/vector/metadata_{database_name}.jsonl")
         else:
-            print(f"\n❌ 数据库 {database_name} 向量化失败")
+            test_logger.error(f"❌ 数据库 {database_name} 向量化失败")
             return
             
         # 测试检索功能
-        print("\n4. 测试检索功能...")
+        test_logger.info("4. 测试检索功能...")
         test_queries = [
             "user information",
             "timestamp field"
         ]
         
         for query in test_queries:
-            print(f"\n查询: '{query}'")
+            test_logger.info(f"查询: '{query}'")
             results = manager.search_fields(query, database_name, top_k=3)
             
             if results:
-                print(f"找到 {len(results)} 个相关字段:")
+                test_logger.info(f"找到 {len(results)} 个相关字段:")
                 for result in results:
-                    print(f"  {result['rank']}. Field ID: {result['field_id']}")
-                    print(f"     相似度: {result['similarity_score']:.3f}")
+                    test_logger.info(f"  {result['rank']}. Field ID: {result['field_id']}")
+                    test_logger.info(f"     相似度: {result['similarity_score']:.3f}")
             else:
-                print("  没有找到相关字段")
+                test_logger.info("  没有找到相关字段")
         
-        print("\n=== 处理完成 ===")
+        test_logger.info("=== 处理完成 ===")
         
     except Exception as e:
-        logging.error(f"处理过程中出现错误: {e}")
-        print(f"❌ 处理失败: {e}")
+        manager.logger.error(f"处理过程中出现错误: {e}")
+        test_logger.error(f"❌ 处理失败: {e}")
     
     finally:
         # 关闭连接
@@ -663,20 +747,21 @@ if __name__ == "__main__":
     # manager = VectorizedFieldManager(enable_info_logging=False)
     
     # try:
-    #     print("开始全量向量化...")
-    #     print("注意: 这可能需要较长时间，请耐心等待")
-    #     print("=" * 50)
+    #     logger = logging.getLogger(__name__)
+    #     logger.info("开始全量向量化...")
+    #     logger.info("注意: 这可能需要较长时间，请耐心等待")
+    #     logger.info("=" * 50)
         
     #     if manager.vectorize_all_databases(page_size=200, embedding_batch_size=50):
-    #         print("\n🎉 全量向量化成功完成!")
+    #         logger.info("🎉 全量向量化成功完成!")
     #     else:
-    #         print("\n❌ 全量向量化失败")
+    #         logger.error("❌ 全量向量化失败")
             
     # except KeyboardInterrupt:
-    #     print("\n⚠️  用户中断操作")
+    #     logger.warning("⚠️  用户中断操作")
     # except Exception as e:
-    #     print(f"\n❌ 全量向量化失败: {e}")
+    #     logger.error(f"❌ 全量向量化失败: {e}")
     #     logging.error(f"Vectorization failed with exception: {e}")
     # finally:
     #     manager.close()
-    #     print("连接已关闭")
+    #     logger.info("连接已关闭")
