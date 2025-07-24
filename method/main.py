@@ -223,7 +223,7 @@ def process_single_query_with_stats(
 def setup_logging() -> None:
     """设置日志配置"""
     logging.basicConfig(
-        level=logging.ERROR,
+        level=logging.ERROR,  # 只输出ERROR级别的日志
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[
             logging.FileHandler('sql_generation.log'),
@@ -501,22 +501,17 @@ def main():
     setup_logging()
     logger = logging.getLogger(__name__)
     
-    logger.info("启动SQL生成系统 - 批量处理模式")
-    
-    # 解析命令行参数
-    parser = argparse.ArgumentParser(description='SQL生成系统 - 批量处理模式')
-    parser.add_argument('--input-file', '-i', type=str, default='spider2-snow-instances-failed.jsonl', help='输入文件路径')
-    parser.add_argument('--max-workers', type=int, default=min(16, (os.cpu_count() or 1) + 4), help='最大工作线程数')
-    parser.add_argument('--timeout', type=int, default=300, help='单个查询超时时间(秒)')
-    
-    args = parser.parse_args()
-    
     try:
         # 获取当前目录
         current_dir = Path(__file__).parent
         
-        print("SQL生成系统 - 批量处理模式")
-        print("="*50)
+        # 解析命令行参数
+        parser = argparse.ArgumentParser(description='SQL生成系统 - 批量处理模式')
+        parser.add_argument('--input-file', '-i', type=str, default='../spider2-snow.jsonl', help='输入文件路径')
+        parser.add_argument('--max-workers', type=int, default=min(16, (os.cpu_count() or 1) + 4), help='最大工作线程数')
+        parser.add_argument('--timeout', type=int, default=300, help='单个查询超时时间(秒)')
+        
+        args = parser.parse_args()
         
         # 检查输入文件
         input_file = current_dir / args.input_file
@@ -532,13 +527,8 @@ def main():
             print("错误: 没有找到查询数据")
             sys.exit(1)
         
-        print(f"加载了 {len(queries)} 个查询")
-        print(f"输入文件: {input_file}")
-        
         # 创建结果目录
         results_dir = create_timestamped_directory(current_dir, "batch_results")
-        print(f"结果将保存到: {results_dir}")
-        print("\n开始批量处理...")
         
         # 使用process_batch_queries函数
         start_time = time.time()
@@ -558,43 +548,8 @@ def main():
         with open(summary_file, 'w', encoding='utf-8') as f:
             json.dump(summary_report, f, ensure_ascii=False, indent=2)
         
-        # 显示处理结果
-        print("\n" + "="*60)
-        print("批量处理完成！")
-        print("="*60)
-        print(f"📊 处理结果")
-        print("-" * 60)
-        print(f"总查询数: {summary_report['total_queries']}")
-        print(f"成功处理: {summary_report['successful']} (有数据返回)")
-        print(f"处理失败: {summary_report['failed']} (无数据返回或执行失败)")
-        print(f"成功率: {summary_report['success_rate']}")
-        print(f"平均修复轮数: {summary_report['average_iterations']}")
-        print(f"完成但无数据: {summary_report['completed_no_data_count']}")
-        print(f"总耗时: {summary_report.get('total_time', '未知')}")
-        print(f"平均每个查询: {summary_report.get('avg_time_per_query', '未知')}")
-        print(f"并发线程数: {args.max_workers}")
-        print(f"结果目录: {results_dir}")
-        print("="*60)
-        
         if summary_report['failed'] > 0:
             print(f"\n⚠️  有 {summary_report['failed']} 个查询处理失败，详细信息请查看 failed_queries.json")
-        
-        print(f"\n📊 详细统计信息已保存到 instance_results.json")
-        
-        # 显示连接池统计信息
-        if HAS_CONNECTION_POOL:
-            try:
-                stats = get_pool_stats()
-                print(f"\n🔗 连接池统计信息:")
-                print(f"  总创建连接数: {stats.get('total_created', 0)}")
-                print(f"  总销毁连接数: {stats.get('total_destroyed', 0)}")
-                print(f"  总借用连接数: {stats.get('total_borrowed', 0)}")
-                print(f"  总归还连接数: {stats.get('total_returned', 0)}")
-                print(f"  总重试次数: {stats.get('total_retries', 0)}")
-                print(f"  当前连接池大小: {stats.get('pool_size', 0)}")
-                print(f"  当前活跃连接数: {stats.get('current_active', 0)}")
-            except Exception as e:
-                print(f"⚠️  获取连接池统计信息失败: {e}")
         
     except KeyboardInterrupt:
         logger.info("程序被用户中断")

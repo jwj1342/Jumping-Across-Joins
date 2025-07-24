@@ -6,3 +6,4 @@ __pycache__/
 *results/
 .vscode/
 resource/vector/
+batch_result*/

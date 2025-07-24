@@ -93,6 +93,55 @@ Extract potential fields from the query. Return EXACTLY {max_fields} fields or f
     partial_variables={"format_instructions": field_extraction_parser.get_format_instructions()}
 )
 
+# Field extraction prompt for node-level search
+NODE_EXTRACTION_PROMPT = PromptTemplate(
+    template="""You are a database concept extraction expert. Your task is to analyze the user's query and extract key business concepts, data themes, and potential search terms that would help locate relevant tables and field groups in a database.
+
+User Query: {user_query}
+Maximum Terms to Extract: {max_fields}
+
+Your task is to extract search terms in these categories:
+
+1. Business Domains:
+   - Main business areas (e.g., sales, inventory, customer service)
+   - Business processes (e.g., order processing, shipment tracking)
+   - Business entities (e.g., products, customers, employees)
+
+2. Data Themes:
+   - Data categories (e.g., temporal data, geographic data)
+   - Data aggregation levels (e.g., daily summary, transaction details)
+   - Data relationships (e.g., customer-order relationship)
+
+3. Analysis Perspectives:
+   - Time-based analysis (e.g., historical trends, future forecasts)
+   - Geographic analysis (e.g., regional distribution)
+   - Performance metrics (e.g., sales performance, efficiency metrics)
+
+4. Common Table Patterns:
+   - Fact tables (e.g., sales_fact, order_fact)
+   - Dimension tables (e.g., customer_dim, product_dim)
+   - Reference tables (e.g., status_lookup, category_reference)
+
+Guidelines:
+1. Focus on business concepts rather than technical field names
+2. Include both specific terms and their broader categories
+3. Consider related business domain vocabulary
+4. Extract complete phrases that describe data needs
+5. Think about both tables and logical field groups
+6. **IMPORTANT**: Extract ONLY the top {max_fields} most relevant terms, prioritizing those that best match the user's analytical needs
+
+Example Transformations:
+- "monthly sales by region" → ["sales performance", "geographic distribution", "temporal analysis"]
+- "customer purchase history" → ["customer behavior", "transaction history", "customer-order relationship"]
+- "product inventory status" → ["inventory management", "product status tracking", "stock levels"]
+
+{format_instructions}
+
+Extract the most relevant search terms. Return EXACTLY {max_fields} terms or fewer if no more relevant terms can be identified. Each term should be a meaningful phrase that captures a business concept or data theme. Respond only with valid JSON, no additional text.""",
+    input_variables=["user_query", "max_fields"],
+    partial_variables={"format_instructions": field_extraction_parser.get_format_instructions()}
+)
+
 # SQL query generation prompt
 SQL_AGENT_PROMPT = PromptTemplate(
 template="""You are a professional SQL generation agent. Generate accurate SQL statements based on user queries and database schema information.

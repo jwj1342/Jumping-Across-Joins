@@ -12,24 +12,24 @@ from Communicate import SystemState
 
 # 全局配置
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.ERROR)  # 设置为ERROR级别
 
 # ===== InfoAgent 实现 =====
 
 def info_agent_node(state: SystemState) -> Dict[str, Any]:
-    """InfoAgent节点 - 纯函数式实现，支持智能摘要生成"""
+    """InfoAgent节点 - 纯函数式实现，支持智能摘要生成V2"""
     try:
         logger.info("InfoAgent开始处理schema信息")
         
         # 使用纯函数式InfoAgent
-        from InfoAgent import get_intelligent_db_summary
+        from InfoAgent import get_intelligent_db_summary_v2
         
         user_query = state.get("user_query", "")
         database_id = state["database_id"]
         
-        logger.info(f"基于用户查询生成智能摘要: {user_query[:100]}...")
-        # 使用智能摘要生成
-        db_summary = get_intelligent_db_summary(database_id, user_query)
-        
+        logger.info(f"基于用户查询生成智能摘要V2: {user_query[:100]}...")
+        # 使用智能摘要生成V2
+        db_summary = get_intelligent_db_summary_v2(database_id, user_query)
         
         if not db_summary:
             logger.error(f"无法为数据库 {database_id} 获取摘要树，流程终止。")
@@ -41,7 +41,7 @@ def info_agent_node(state: SystemState) -> Dict[str, Any]:
             }
 
         # 记录摘要类型
-        summary_type = "智能摘要" if user_query and user_query.strip() else "默认摘要"
+        summary_type = "智能摘要V2" if user_query and user_query.strip() else "默认摘要"
         logger.info(f"InfoAgent完成，已成功获取{summary_type}。")
         
         # 使用Send API发送到SqlAgent

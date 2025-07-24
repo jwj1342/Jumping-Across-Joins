@@ -38,7 +38,7 @@ class Vectorization:
         初始化向量化处理器
         
         Args:
-            enable_info_logging (bool): 是否启用info级别日志
+            enable_info_logging (bool): 是否启用info级别日志，默认为False
         """
         # 创建独立的logger
         self.logger = logging.getLogger(f"{__name__}.Vectorization")

@@ -17,7 +17,8 @@ from utils.CypherExecutor import CypherExecutor
 from utils.init_llm import initialize_llm
 from langchain_core.tools import tool
 from vectorization import VectorizedFieldManager
-from method.prompts import FIELD_EXTRACTION_PROMPT, field_extraction_parser
+from vectorizaion_v2 import Vectorization
+from method.prompts import FIELD_EXTRACTION_PROMPT, field_extraction_parser, NODE_EXTRACTION_PROMPT
 from method.CypherTemplate import TABLE_BASED_DB_STRUCTURE_TREE_QUERY
 
 # 设置日志 - 使用全局配置
@@ -29,6 +30,7 @@ if not _logger.handlers:
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     handler.setFormatter(formatter)
     _logger.addHandler(handler)
+    _logger.setLevel(logging.ERROR)  # 设置为ERROR级别
 
 
 # ===== 核心函数式API =====
@@ -87,6 +89,71 @@ def search_related_fields(query: List[str], database_id: str, top_k: int = 3) ->
         # 确保资源被正确释放
         if 'vector_manager' in locals():
             vector_manager.close()
+
+
+@tool
+def search_related_node(
+    query: List[str],
+    database_id: str,
+    top_k: int = 3
+) -> List[Dict[str, Any]]:
+    """
+    在指定数据库中搜索与查询相关的节点（表和字段组）
+    
+    Args:
+        query: 查询字符串列表
+        database_id: 数据库ID
+        top_k: 返回的最大结果数量
+    
+    Returns:
+        相关节点的列表，包含节点信息和相似度分数
+    """
+    if not query or not database_id:
+        _logger.warning("查询列表或数据库ID为空")
+        return []
+    
+    try:
+        vectorizer = Vectorization(enable_info_logging=False)
+        all_results = []
+        seen_element_ids = set()
+        
+        # 对每个查询进行搜索
+        for query_text in query:
+            if not query_text.strip():
+                continue
+                
+            # 使用search_items方法搜索
+            results = vectorizer.search_items(
+                query=query_text.strip(),
+                database_name=database_id,
+                top_k=top_k
+            )
+            
+            # 添加未见过的结果
+            for result in results:
+                element_id = result.get('element_id')
+                if element_id and element_id not in seen_element_ids:
+                    seen_element_ids.add(element_id)
+                    # 添加查询信息以便跟踪
+                    result['matched_query'] = query_text.strip()
+                    all_results.append(result)
+        
+        # 按相似度分数排序（降序）
+        all_results.sort(key=lambda x: x.get('similarity_score', 0), reverse=True)
+        
+        # 返回前top_k个结果
+        final_results = all_results[:top_k]
+        
+        _logger.info(f"为数据库 '{database_id}' 的 {len(query)} 个查询找到 {len(final_results)} 个相关节点")
+        return final_results
+        
+    except Exception as e:
+        _logger.error(f"搜索相关节点时出错: {e}")
+        return []
+    finally:
+        # 确保资源被正确释放
+        if 'vectorizer' in locals():
+            vectorizer.close()
 
 
 def get_intelligent_db_summary(database_id: str, user_query: str, top_k: int = 10) -> Dict[str, Any]:
@@ -218,113 +285,178 @@ def get_intelligent_db_summary(database_id: str, user_query: str, top_k: int = 1
         _logger.error(f"智能摘要生成失败: {e}")
         return {}
 
-
-# if __name__ == "__main__":
-#     print("=== InfoAgent功能测试 ===\n")
+def get_intelligent_db_summary_v2(database_id: str, user_query: str, top_k: int = 10) -> Dict[str, Any]:
+    """
+    基于用户查询智能生成数据库摘要树新版
     
-#     # 测试配置
-#     test_database = "CRYPTO"
-#     test_user_query = "Find all user information including addresses and transaction history"
-    
-#     # 1. 测试search_related_fields函数
-#     print("1. 测试search_related_fields函数...")
-#     test_queries = ["user information", "transaction data", "block data"]
-#     print(f"数据库: {test_database}")
-#     print(f"查询词: {test_queries}")
-    
-#     results = search_related_fields.invoke({
-#         "query": test_queries,
-#         "database_id": test_database,
-#         "top_k": 5
-#     })
-    
-#     if results:
-#         print("\n找到以下相关字段:")
-#         for result in results:
-#             print(f"\n- 字段: {result['field_name']} ({result['field_type']})")
-#             print(f"  表: {result['table']}")
-#             print(f"  匹配查询: {result['matched_query']}")
-#             print(f"  相似度分数: {result['similarity_score']:.3f}")
-#     else:
-#         print("\n未找到相关字段")
-    
-#     print("\n" + "="*50)
-    
-#     # 2. 测试智能摘要生成（包含相关表的所有字段）
-#     print("\n2. 测试智能摘要生成（包含相关表的所有字段）...")
-#     print(f"数据库: {test_database}")
-#     print(f"用户查询: {test_user_query}")
-    
-#     intelligent_summary = get_intelligent_db_summary(test_database, test_user_query)
-    
-#     if intelligent_summary:
-#         print("\n✅ 智能摘要生成成功!")
-#         print(f"数据库: {intelligent_summary.get('database', 'N/A')}")
+    Args:
+        database_id: 数据库ID
+        user_query: 用户查询
+        top_k: 搜索返回的最大节点数
         
-#         # 显示搜索元信息
-#         metadata = intelligent_summary.get('_search_metadata', {})
-#         if metadata:
-#             print(f"\n搜索元信息:")
-#             print(f"  - 原始查询: {metadata.get('user_query', 'N/A')}")
-#             print(f"  - top_k参数: {metadata.get('top_k', 'N/A')}")
-#             print(f"  - 字段提取限制: {metadata.get('max_fields', 'N/A')}")
-#             print(f"  - 提取字段: {metadata.get('extracted_fields', [])}")
-#             print(f"  - 提取字段数: {metadata.get('extracted_fields_count', 0)}")
-#             print(f"  - 找到相关字段数: {metadata.get('found_fields_count', 0)}")
-#             print(f"  - 相关表数: {metadata.get('table_count', 0)}")
-#             print(f"  - 相关表名(全限定): {metadata.get('related_tables', [])}")
-        
-#         # 显示摘要结构
-#         schemas = intelligent_summary.get('schemas', [])
-#         print(f"\n摘要结构:")
-#         for schema in schemas:
-#             schema_name = schema.get('schema', 'Unknown')
-#             tables = schema.get('tables', [])
-#             print(f"  Schema: {schema_name} ({len(tables)} 个表)")
+    Returns:
+        智能生成的数据库摘要字典
+    """
+    _logger.info(f"为数据库 '{database_id}' 基于用户查询生成智能摘要V2...")
+    
+    try:
+        # 1. 使用LLM和提示模板提取潜在搜索词
+        llm = initialize_llm()
+        if not llm:
+            _logger.error("LLM初始化失败，无法提取搜索词")
+            return {}
             
-#             for table in tables[:3]:  # 只显示前3个表
-#                 table_name = table.get('table', 'Unknown')
-#                 fields = table.get('fields', [])
-#                 print(f"    Table: {table_name} ({len(fields)} 个字段)")
+        # 计算搜索词数量限制
+        max_terms = min(max(top_k, 5), 20)  # 最少5个，最多20个
+        
+        # 使用新的NODE_EXTRACTION_PROMPT
+        from method.prompts import NODE_EXTRACTION_PROMPT, field_extraction_parser
+        
+        # 创建并执行chain提取业务概念和主题
+        chain = NODE_EXTRACTION_PROMPT | llm | field_extraction_parser
+        response = chain.invoke({
+            "user_query": user_query,
+            "max_fields": max_terms
+        })
+        
+        search_terms = response.get('fields', [])
+        if len(search_terms) > max_terms:
+            search_terms = search_terms[:max_terms]
+        
+        if not search_terms:
+            _logger.warning("未从查询中提取到搜索词，使用整个查询进行搜索")
+            search_terms = [user_query]
+        
+        _logger.info(f"成功提取{len(search_terms)}个搜索词用于节点搜索：{search_terms}")
+        
+        # 2. 使用search_related_node搜索相关节点
+        related_nodes = search_related_node.invoke({
+            "query": search_terms,
+            "database_id": database_id,
+            "top_k": top_k
+        })
+        
+        if not related_nodes:
+            _logger.error("未找到相关节点")
+            return {}
+            
+        # 3. 初始化Neo4j执行器
+        cypher_executor = CypherExecutor(enable_info_logging=True)
+        
+        # 4. 分类处理不同类型的节点
+        tables_to_process = []  # 存储需要处理的表名
+        
+        for node in related_nodes:
+            node_type = node.get('item_type')
+            
+            if node_type == 'table':
+                # 直接添加表
+                if node.get('name'):
+                    tables_to_process.append(node['name'])
+                    
+            elif node_type == 'group_node':
+                # 查询使用该group node的表
+                group_node_id = node.get('element_id')
+                if not group_node_id:
+                    continue
+                    
+                # 查询使用该group node的表
+                success, results = cypher_executor.execute_transactional_cypher(
+                    """
+                    MATCH (t:Table)-[:USES_FIELD_GROUP]->(g:FieldGroup)
+                    WHERE g.id = $group_node_id
+                    RETURN t.name as table_name
+                    """,
+                    {"group_node_id": group_node_id}
+                )
                 
-#                 for field in fields[:3]:  # 只显示前3个字段
-#                     if isinstance(field, dict):
-#                         field_name = field.get('name', 'Unknown')
-#                         field_type = field.get('type', 'Unknown')
-#                         field_desc = field.get('description', '')
-#                         field_id = field.get('field_id', 'Unknown')
-#                         print(f"      - {field_name} ({field_type})")
-#                         if field_desc:
-#                             print(f"        描述: {field_desc}")
-#                         print(f"        字段ID: {field_id}")
-#                     else:
-#                         print(f"      - {field}")
-#     else:
-#         print("\n❌ 智能摘要生成失败")
-    
-#     print("\n" + "="*50)
-    
-    
-#     print("\n=== 测试完成 ===")
+                if success and results:
+                    # 获取相关表名列表
+                    related_tables = [r['table_name'] for r in results if r.get('table_name')]
+                    
+                    if related_tables:
+                        # 使用LLM选择最相关的表（最多2-3个）
+                        chain = (
+                            "Given the user query: {query}\n"
+                            "And these tables that use a related field group: {tables}\n"
+                            "Select the 1-2 most relevant tables that would best answer the query.\n"
+                            "Return only the table names, separated by commas."
+                        ) | llm
+                        
+                        selected_tables_str = chain.invoke({
+                            "query": user_query,
+                            "tables": ", ".join(related_tables)
+                        })
+                        
+                        # 处理LLM返回的表名
+                        selected_tables = [t.strip() for t in selected_tables_str.split(',')]
+                        tables_to_process.extend(selected_tables)
+        
+        # 去重
+        tables_to_process = list(set(tables_to_process))
+        
+        if not tables_to_process:
+            _logger.error("未找到需要处理的相关表")
+            return {}
+            
+        # 5. 构建最终的摘要树
+        success, graph_results = cypher_executor.execute_transactional_cypher(
+            TABLE_BASED_DB_STRUCTURE_TREE_QUERY,
+            {
+                "database_id": database_id,
+                "table_names": tables_to_process
+            }
+        )
+        
+        if success and graph_results:
+            summary = graph_results[0].get('dbSummary', {})
+            
+            # 6. 添加搜索元信息
+            summary['_search_metadata'] = {
+                'user_query': user_query,
+                'top_k': top_k,
+                'max_terms': max_terms,
+                'extracted_terms': search_terms,
+                'extracted_terms_count': len(search_terms),
+                'found_nodes_count': len(related_nodes),
+                'processed_tables': tables_to_process,
+                'table_count': len(tables_to_process),
+                'version': 'v2'  # 标记这是v2版本的摘要
+            }
+            
+            _logger.info(f"成功为数据库 '{database_id}' 生成V2版本的智能摘要")
+            return summary
+            
+        else:
+            _logger.error("构建摘要树失败")
+            return {}
+            
+    except Exception as e:
+        _logger.error(f"V2智能摘要生成失败: {e}")
+        return {}
 
 if __name__ == "__main__":
-    # 测试 search_related_fields 工具
-    test_data = {
-        'query': ['station_id', 'station_number', 'date', 'record_date', 'average_temperature', 'temperature_avg', 'month', 'year', 'ranking', 'top_n'],
-        'database_id': 'NOAA_GSOD',
-        'top_k': 10
+    # 测试新的 search_related_node 工具
+    print("\n\n开始测试 search_related_node...")
+    test_data_node = {
+        'query': ['zip code boundaries', 'geographic data', 'employment data', 'time series'],
+        'database_id': 'BLS',
+        'top_k': 5
     }
     
-    print("\n开始测试 search_related_fields...")
-    results = search_related_fields.invoke({
-        "query": test_data['query'],
-        "database_id": test_data['database_id'],
-        "top_k": test_data['top_k']
+    node_results = search_related_node.invoke({
+        "query": test_data_node['query'],
+        "database_id": test_data_node['database_id'],
+        "top_k": test_data_node['top_k']
     })
     
-    print(f"\n找到 {len(results)} 个相关字段:")
-    for idx, result in enumerate(results, 1):
+    print(f"\n找到 {len(node_results)} 个相关节点:")
+    for idx, result in enumerate(node_results, 1):
         print(f"\n结果 {idx}:")
-        print(f"  字段ID: {result.get('field_id')}")
+        print(f"  节点类型: {result.get('item_type')}")
+        print(f"  名称: {result.get('name')}")
+        if result.get('schema'):
+            print(f"  模式: {result.get('schema')}")
         print(f"  相似度: {result.get('similarity_score', 0):.4f}")
         print(f"  匹配查询: {result.get('matched_query')}")
+        print(f"  描述摘要: {result.get('description')[:150]}...")
